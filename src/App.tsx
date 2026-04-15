@@ -142,7 +142,7 @@ function Dashboard({ session }: { session: Session }) {
 
         {activeTab === 'compose' && <ComposeTab session={session} attachments={pendingAttachments} setAttachments={setPendingAttachments} />}
         {activeTab === 'contacts' && <ContactsTab session={session} filterListId={filterListId} refreshListsKey={refreshListsKey} />}
-        {activeTab === 'history' && <HistoryTab />}
+        {activeTab === 'history' && <HistoryTab session={session} />}
         {activeTab === 'files' && <FilesTab session={session} />}
         {activeTab === 'lists' && <ListsTab session={session} onSelectList={handleSelectList} onListsChanged={handleListsChanged} />}
         {activeTab === 'settings' && <SettingsTab session={session} />}
@@ -965,7 +965,7 @@ interface EmailEvent {
   created_at: string
 }
 
-function HistoryTab() {
+function HistoryTab({ session }: { session: Session }) {
   const [sends, setSends] = useState<EmailSend[]>([])
   const [attachments, setAttachments] = useState<Record<string, Attachment[]>>({})
   const [events, setEvents] = useState<Record<string, EmailEvent[]>>({})
@@ -975,11 +975,16 @@ function HistoryTab() {
   const [searchFile, setSearchFile] = useState('')
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
+  const [tenantId, setTenantId] = useState<string | null>(null)
 
   useEffect(() => {
-    const fetch = async () => {
+    const fetchData = async () => {
       setLoading(true)
-      const { data } = await supabase.from('email_sends').select('*').order('created_at', { ascending: false }).limit(200)
+      const { data: membership } = await supabase.from('memberships').select('tenant_id').eq('user_id', session.user.id).single()
+      if (!membership) { setLoading(false); return }
+      setTenantId(membership.tenant_id)
+
+      const { data } = await supabase.from('email_sends').select('*').eq('tenant_id', membership.tenant_id).order('created_at', { ascending: false }).limit(200)
       if (data) setSends(data as EmailSend[])
       
       const sendIds = data?.map(s => s.id) || []
@@ -1006,8 +1011,8 @@ function HistoryTab() {
       }
       setLoading(false)
     }
-    fetch()
-  }, [])
+    fetchData()
+  }, [session.user.id])
 
   const filteredSends = sends.filter(s => {
     const matchesEmail = !searchEmail || s.recipient_email.toLowerCase().includes(searchEmail.toLowerCase()) || s.subject.toLowerCase().includes(searchEmail.toLowerCase())
@@ -1070,19 +1075,19 @@ function HistoryTab() {
 
   const deleteRecords = async () => {
     const dataToDelete = hasFilters ? filteredSends : sends
-    if (dataToDelete.length === 0) return
-    
-    const confirmMsg = hasFilters 
+    if (dataToDelete.length === 0 || !tenantId) return
+
+    const confirmMsg = hasFilters
       ? `Delete ${dataToDelete.length} filtered records? This cannot be undone.`
       : `Delete ALL ${dataToDelete.length} history records? This cannot be undone.`
-    
+
     if (!confirm(confirmMsg)) return
-    
+
     const sendIds = dataToDelete.map(s => s.id)
-    
+
     await supabase.from('email_events').delete().in('send_id', sendIds)
     await supabase.from('send_attachments').delete().in('send_id', sendIds)
-    await supabase.from('email_sends').delete().in('id', sendIds)
+    await supabase.from('email_sends').delete().in('id', sendIds).eq('tenant_id', tenantId)
     
     setSends(sends.filter(s => !sendIds.includes(s.id)))
     const newAttachments: Record<string, Attachment[]> = {}
