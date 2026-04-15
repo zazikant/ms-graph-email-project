@@ -410,77 +410,6 @@ function ComposeTab({ session, attachments, setAttachments }: { session: Session
     setLoading(false)
   }
 
-  const sendListEmails = async (tenantId: string, trackingId: string, emails: string[], subject: string, html: string, attachments: any[]) => {
-    const sendWithRetry = async (email: string, retries = 3): Promise<boolean> => {
-      for (let attempt = 0; attempt < retries; attempt++) {
-        try {
-          const response = await fetch(EDGE_FUNCTION_URL, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              recipient_email: email,
-              subject,
-              html_content: html,
-              attachments,
-              send_now: true,
-              tenant_id: tenantId,
-            }),
-          })
-
-          if (response.ok) return true
-          
-          if (response.status === 429) {
-            const retryAfter = response.headers.get('Retry-After')
-            const waitTime = retryAfter ? parseInt(retryAfter) * 1000 : 2000 * (attempt + 1)
-            await new Promise(r => setTimeout(r, waitTime))
-            continue
-          }
-
-          const data = await response.json()
-          if (data.error?.includes('401') || data.error?.includes('token')) {
-            return false
-          }
-          
-          if (attempt < retries - 1) {
-            await new Promise(r => setTimeout(r, 1000 * (attempt + 1)))
-            continue
-          }
-          return false
-        } catch {
-          if (attempt < retries - 1) {
-            await new Promise(r => setTimeout(r, 1000 * (attempt + 1)))
-            continue
-          }
-          return false
-        }
-      }
-      return false
-    }
-
-    let successCount = 0
-    for (let i = 0; i < emails.length; i++) {
-      const email = emails[i]
-      const success = await sendWithRetry(email)
-      
-      if (success) {
-        successCount++
-        await supabase.from('email_sends')
-          .update({ status: 'sent', sent_at: new Date().toISOString() })
-          .eq('tracking_id', trackingId)
-          .eq('recipient_email', email)
-      } else {
-        await supabase.from('email_sends')
-          .update({ status: 'failed' })
-          .eq('tracking_id', trackingId)
-          .eq('recipient_email', email)
-      }
-
-      if (i < emails.length - 1) {
-        await new Promise(r => setTimeout(r, 150))
-      }
-    }
-  }
-
   return (
     <div className="bg-white p-6 rounded shadow">
       <form onSubmit={handleSubmit} className="space-y-4">
@@ -701,16 +630,6 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
   const [dateTo, setDateTo] = useState('')
   const [uploading, setUploading] = useState(false)
 
-  useEffect(() => {
-    fetchData()
-  }, [])
-
-  useEffect(() => {
-    if (filterListId) {
-      setFilterList(filterListId)
-    }
-  }, [filterListId])
-
   const fetchData = async () => {
     setLoading(true)
     const { data: membership } = await supabase.from('memberships').select('tenant_id').eq('user_id', session.user.id).single()
@@ -725,6 +644,16 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
     if (listsRes.data) setLists(listsRes.data as ContactList[])
     setLoading(false)
   }
+
+  useEffect(() => {
+    fetchData()
+  }, [])
+
+  useEffect(() => {
+    if (filterListId) {
+      setFilterList(filterListId)
+    }
+  }, [filterListId])
 
   useEffect(() => {
     fetchData()
