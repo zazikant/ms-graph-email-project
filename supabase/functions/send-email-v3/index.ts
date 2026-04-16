@@ -86,6 +86,7 @@ Deno.serve(async (req) => {
       .from('email_sends')
       .insert({
         tenant_id,
+        user_id,
         tracking_id,
         recipient_email,
         subject,
