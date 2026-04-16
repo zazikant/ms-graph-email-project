@@ -14,6 +14,7 @@ Deno.serve(async (req) => {
   try {
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!
     const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
+    const supabase = createClient(supabaseUrl, supabaseServiceKey)
 
     const { email, tenant_id, requesting_user_id } = await req.json()
 
@@ -24,10 +25,6 @@ Deno.serve(async (req) => {
       })
     }
 
-    // Create service role client
-    const supabase = createClient(supabaseUrl, supabaseServiceKey)
-
-    // Verify the requesting user is an admin
     const { data: requestingMembership } = await supabase
       .from('memberships')
       .select('role')
@@ -42,44 +39,24 @@ Deno.serve(async (req) => {
       })
     }
 
-    // Find user from public.users
     const { data: userData } = await supabase
       .from('users')
       .select('id')
       .eq('email', email)
       .single()
 
-    let userId = userData?.id
-
-    // If not found in public.users, search auth.users via listUsers
-    if (!userId) {
-      const adminClient = createClient(supabaseUrl, supabaseServiceKey)
-      const { data: { users } } = await adminClient.auth.admin.listUsers()
-      const authUser = users?.find(u => u.email === email)
-      userId = authUser?.id
-    }
-
-    if (!userId) {
+    if (!userData) {
       return new Response(JSON.stringify({ error: 'User not found' }), {
         status: 404,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       })
     }
 
-    // Delete from memberships
-    await supabase
-      .from('memberships')
-      .delete()
-      .eq('user_id', userId)
-      .eq('tenant_id', tenant_id)
+    const userId = userData.id
 
-    // Delete from public.users
-    await supabase
-      .from('users')
-      .delete()
-      .eq('id', userId)
+    await supabase.from('memberships').delete().eq('user_id', userId).eq('tenant_id', tenant_id)
+    await supabase.from('users').delete().eq('id', userId)
 
-    // Delete from auth.users using REST API
     const response = await fetch(`${supabaseUrl}/auth/v1/admin/users/${userId}`, {
       method: 'DELETE',
       headers: {
@@ -89,8 +66,7 @@ Deno.serve(async (req) => {
     })
 
     if (!response.ok && response.status !== 404) {
-      const errorText = await response.text()
-      console.error('Failed to delete auth user:', errorText)
+      console.error('Failed to delete auth user:', await response.text())
     }
 
     return new Response(JSON.stringify({ success: true }), {
