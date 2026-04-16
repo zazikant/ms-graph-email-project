@@ -577,6 +577,7 @@ function ComposeTab({ session, attachments, setAttachments }: { session: Session
         for (const contact of listContacts) {
           await supabase.from('email_sends').insert({
             tenant_id: membership.tenant_id,
+            user_id: session.user.id,
             tracking_id,
             recipient_email: contact.email,
             subject,
@@ -606,6 +607,7 @@ function ComposeTab({ session, attachments, setAttachments }: { session: Session
             send_now: sendNow,
             send_at: sendNow ? null : new Date(sendAt).toISOString(),
             tenant_id: membership.tenant_id,
+            user_id: session.user.id,
           }),
         })
 

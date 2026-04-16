@@ -42,7 +42,7 @@ Deno.serve(async (req) => {
     const supabase = createClient(supabaseUrl, supabaseKey);
 
     const body = await req.json();
-    const { recipient_email, subject, html_content, attachments, send_now = true, send_at, tenant_id } = body;
+    const { recipient_email, subject, html_content, attachments, send_now = true, send_at, tenant_id, user_id } = body;
 
     if (!recipient_email || !subject || !html_content) {
       return new Response(JSON.stringify({ error: 'Missing required fields' }), {
@@ -53,6 +53,13 @@ Deno.serve(async (req) => {
 
     if (!tenant_id) {
       return new Response(JSON.stringify({ error: 'No tenant configured' }), {
+        status: 400,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+
+    if (!user_id) {
+      return new Response(JSON.stringify({ error: 'No user_id configured' }), {
         status: 400,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       });
@@ -102,7 +109,7 @@ Deno.serve(async (req) => {
     }
 
     if (send_now) {
-      await sendViaGraph(supabase, tenant_id, sendRecord.id, tracking_id, recipient_email, subject, html_content, attachments);
+      await sendViaGraph(supabase, tenant_id, user_id, sendRecord.id, tracking_id, recipient_email, subject, html_content, attachments);
     }
 
     return new Response(JSON.stringify({ success: true, tracking_id, send_id: sendRecord.id }), {
@@ -117,11 +124,12 @@ Deno.serve(async (req) => {
   }
 });
 
-async function sendViaGraph(supabase, tenant_id, send_id, tracking_id, recipient, subject, html, attachments) {
+async function sendViaGraph(supabase, tenant_id, user_id, send_id, tracking_id, recipient, subject, html, attachments) {
   const { data: membership } = await supabase
     .from('memberships')
     .select('ms_access_token, ms_refresh_token, tenant_id, user_id')
     .eq('tenant_id', tenant_id)
+    .eq('user_id', user_id)
     .single();
 
   if (!membership?.ms_access_token) {
@@ -142,7 +150,7 @@ async function sendViaGraph(supabase, tenant_id, send_id, tracking_id, recipient
       if (tenant?.ms_client_id && tenant?.ms_client_secret && membership.ms_refresh_token) {
         try {
           accessToken = await refreshAccessToken(tenant.ms_client_id, tenant.ms_client_secret, membership.ms_refresh_token);
-          await supabase.from('memberships').update({ ms_access_token: accessToken }).eq('tenant_id', tenant_id);
+          await supabase.from('memberships').update({ ms_access_token: accessToken }).eq('tenant_id', tenant_id).eq('user_id', user_id);
           accessToken = await doSendEmail(supabase, accessToken, send_id, tracking_id, recipient, subject, html, attachments);
         } catch (refreshErr) {
           await supabase.from('email_sends').update({ status: 'failed' }).eq('id', send_id);

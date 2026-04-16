@@ -86,7 +86,7 @@ Deno.serve(async (req) => {
       }
 
       try {
-        await sendViaGraphWithRetry(supabase, email.tenant_id, email.id, email.tracking_id, 
+        await sendViaGraphWithRetry(supabase, email.tenant_id, email.user_id, email.id, email.tracking_id, 
           email.recipient_email, email.subject, email.html_content, null)
         sentCount++
       } catch (err) {
@@ -128,13 +128,14 @@ Deno.serve(async (req) => {
   }
 })
 
-async function sendViaGraphWithRetry(supabase: any, tenant_id: string, send_id: string, tracking_id: string, recipient: string, subject: string, html: string, attachments: any, retries = MAX_RETRIES) {
+async function sendViaGraphWithRetry(supabase: any, tenant_id: string, user_id: string, send_id: string, tracking_id: string, recipient: string, subject: string, html: string, attachments: any, retries = MAX_RETRIES) {
   await supabase.from('email_sends').update({ status: 'processing' }).eq('id', send_id)
 
   const { data: membership } = await supabase
     .from('memberships')
     .select('ms_access_token, ms_refresh_token, tenant_id, user_id')
     .eq('tenant_id', tenant_id)
+    .eq('user_id', user_id)
     .single()
 
   if (!membership?.ms_access_token) {
@@ -158,7 +159,7 @@ async function sendViaGraphWithRetry(supabase: any, tenant_id: string, send_id: 
         if (tenant?.ms_client_id && tenant?.ms_client_secret && membership.ms_refresh_token) {
           try {
             accessToken = await refreshAccessToken(tenant.ms_client_id, tenant.ms_client_secret, membership.ms_refresh_token)
-            await supabase.from('memberships').update({ ms_access_token: accessToken }).eq('tenant_id', tenant_id)
+            await supabase.from('memberships').update({ ms_access_token: accessToken }).eq('tenant_id', tenant_id).eq('user_id', user_id)
             accessToken = await doSendEmail(supabase, accessToken, send_id, tracking_id, recipient, subject, html, attachments)
             return
           } catch (refreshErr) {
