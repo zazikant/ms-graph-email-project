@@ -92,13 +92,13 @@ Deno.serve(async (req) => {
       } catch (err) {
         const errMsg = err.message || ''
         if (errMsg.includes('no refresh token') || errMsg.includes('Token refresh failed') || errMsg.includes('Token revoked') || errMsg.includes('will retry when token')) {
-          console.log('Token issue, stopping. Remaining emails will retry when token is updated.')
-          tokenRefreshFailed = true
-          skippedCount = (scheduledEmails?.length || 0) - sentCount - failedCount
+          console.log(`Token issue for ${email.recipient_email}. Marking as failed, continuing to next.`)
+          await supabase.from('email_sends').update({ status: 'failed', failure_reason: 'Token issue - update token in Settings' }).eq('id', email.id)
+          failedCount++
         } else if (errMsg.includes('rate limit') || errMsg.includes('429')) {
-          console.log('Rate limited, pausing. Remaining emails will retry later.')
-          rateLimited = true
-          skippedCount = (scheduledEmails?.length || 0) - sentCount - failedCount - (scheduledEmails?.length || 0) + i + 1
+          console.log(`Rate limited for ${email.recipient_email}. Marking as scheduled to retry later.`)
+          await supabase.from('email_sends').update({ status: 'scheduled', failure_reason: 'Rate limited - will retry' }).eq('id', email.id)
+          skippedCount++
         } else {
           failedCount++
         }
