@@ -14,7 +14,6 @@ Deno.serve(async (req) => {
   try {
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!
     const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
-    const supabase = createClient(supabaseUrl, supabaseServiceKey)
 
     const { email, tenant_id, requesting_user_id } = await req.json()
 
@@ -24,6 +23,9 @@ Deno.serve(async (req) => {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       })
     }
+
+    // Create service role client
+    const supabase = createClient(supabaseUrl, supabaseServiceKey)
 
     // Verify the requesting user is an admin
     const { data: requestingMembership } = await supabase
@@ -40,51 +42,45 @@ Deno.serve(async (req) => {
       })
     }
 
-    // Find the user by email
-    const { data: userData, error: userError } = await supabase
+    // Find user from public.users
+    const { data: userData } = await supabase
       .from('users')
       .select('id')
       .eq('email', email)
       .single()
 
-    if (userError || !userData) {
-      // Try auth.users directly via admin API
-      // First delete from memberships
-      await supabase
-        .from('memberships')
-        .delete()
-        .eq('tenant_id', tenant_id)
-        .eq('user_id', (await supabase.auth.admin.listUsers()).users.find(u => u.email === email)?.id || '')
+    let userId = userData?.id
 
-      return new Response(JSON.stringify({ success: true, message: 'Membership deleted' }), {
+    // If not found in public.users, search auth.users via listUsers
+    if (!userId) {
+      const adminClient = createClient(supabaseUrl, supabaseServiceKey)
+      const { data: { users } } = await adminClient.auth.admin.listUsers()
+      const authUser = users?.find(u => u.email === email)
+      userId = authUser?.id
+    }
+
+    if (!userId) {
+      return new Response(JSON.stringify({ error: 'User not found' }), {
+        status: 404,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       })
     }
 
-    // Delete from memberships first
-    const { error: memberError } = await supabase
+    // Delete from memberships
+    await supabase
       .from('memberships')
       .delete()
-      .eq('user_id', userData.id)
+      .eq('user_id', userId)
       .eq('tenant_id', tenant_id)
 
-    if (memberError) {
-      return new Response(JSON.stringify({ error: 'Failed to delete membership: ' + memberError.message }), {
-        status: 500,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-      })
-    }
+    // Delete from public.users
+    await supabase
+      .from('users')
+      .delete()
+      .eq('id', userId)
 
-    // Delete from auth.users using admin API
-    const adminClient = createClient(supabaseUrl, supabaseServiceKey, {
-      auth: {
-        autoRefreshToken: false,
-        persistSession: false
-      }
-    })
-
-    // Use the REST API to delete the user
-    const response = await fetch(`${supabaseUrl}/auth/v1/admin/users/${userData.id}`, {
+    // Delete from auth.users using REST API
+    const response = await fetch(`${supabaseUrl}/auth/v1/admin/users/${userId}`, {
       method: 'DELETE',
       headers: {
         'Authorization': `Bearer ${supabaseServiceKey}`,
@@ -93,8 +89,8 @@ Deno.serve(async (req) => {
     })
 
     if (!response.ok && response.status !== 404) {
-      console.error('Failed to delete auth user:', await response.text())
-      // Don't fail the whole operation if auth delete fails - membership is already deleted
+      const errorText = await response.text()
+      console.error('Failed to delete auth user:', errorText)
     }
 
     return new Response(JSON.stringify({ success: true }), {

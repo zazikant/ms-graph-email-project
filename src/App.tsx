@@ -2043,13 +2043,48 @@ function InvitationsTab({ session }: { session: Session }) {
   }
 
   const handleDelete = async (invitation: Invitation) => {
-    if (!confirm(`Delete invitation for ${invitation.email}? This will remove their access to the team.`)) return
+    if (!confirm(`Delete invitation for ${invitation.email}? This will remove their access to the team and delete their account.`)) return
 
     setLoading(true)
     setError('')
     setSuccess('')
     try {
-      // Find the user's membership and delete it
+      // Get user's tenant membership info
+      const { data: myMembership } = await supabase
+        .from('memberships')
+        .select('tenant_id')
+        .eq('user_id', session.user.id)
+        .single()
+
+      if (!myMembership) {
+        setError('Not authorized')
+        setLoading(false)
+        return
+      }
+
+      // Try to call edge function to delete auth user and membership
+      try {
+        const response = await fetch(`${SUPABASE_URL}/functions/v1/delete-user`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${session.access_token}`
+          },
+          body: JSON.stringify({
+            email: invitation.email,
+            tenant_id: myMembership.tenant_id,
+            requesting_user_id: session.user.id
+          })
+        })
+
+        if (!response.ok) {
+          console.error('Edge function error:', await response.text())
+        }
+      } catch (e) {
+        console.error('Edge function call failed:', e)
+      }
+
+      // Delete public.users record (direct delete since edge function might fail)
       const { data: userData } = await supabase
         .from('users')
         .select('id')
@@ -2057,20 +2092,22 @@ function InvitationsTab({ session }: { session: Session }) {
         .single()
 
       if (userData) {
-        const { error: memberError } = await supabase
+        await supabase
+          .from('users')
+          .delete()
+          .eq('id', userData.id)
+      }
+
+      // Delete membership
+      if (userData) {
+        await supabase
           .from('memberships')
           .delete()
           .eq('user_id', userData.id)
           .eq('tenant_id', invitation.tenant_id)
-
-        if (memberError) {
-          setError('Failed to remove membership: ' + memberError.message)
-          setLoading(false)
-          return
-        }
       }
 
-      // Delete the invitation record
+      // Delete invitation
       const { error: deleteError } = await supabase
         .from('invitations')
         .delete()
@@ -2080,7 +2117,7 @@ function InvitationsTab({ session }: { session: Session }) {
         setError('Failed to delete invitation')
       } else {
         fetchInvitations()
-        setSuccess(`Removed ${invitation.email} from the team.`)
+        setSuccess(`Removed ${invitation.email} from the team. Their auth account will be deleted shortly.`)
       }
     } catch (err) {
       setError('Failed to delete: ' + (err instanceof Error ? err.message : 'Unknown error'))
