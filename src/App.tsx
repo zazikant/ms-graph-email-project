@@ -396,16 +396,19 @@ function ComposeTab({ session, attachments, setAttachments }: { session: Session
 
   useEffect(() => {
     if (!session?.user?.id) return
-    supabase.storage.from(BUCKET_NAME).list(session.user.id, { limit: 100 })
-      .then(({ data }) => {
-        if (data) {
-          setAvailableFiles(data.map(f => ({
-            name: f.name,
-            path: `${session.user.id}/${f.name}`,
-            size: f.metadata?.size || 0
-          })))
-        }
-      })
+    const fetchFilesForPicker = async () => {
+      const { data: membership } = await supabase.from('memberships').select('tenant_id').eq('user_id', session.user.id).single()
+      if (!membership) return
+      const { data } = await supabase.storage.from(BUCKET_NAME).list(membership.tenant_id, { limit: 100 })
+      if (data) {
+        setAvailableFiles(data.map(f => ({
+          name: f.name,
+          path: `${membership.tenant_id}/${f.name}`,
+          size: f.metadata?.size || 0
+        })))
+      }
+    }
+    fetchFilesForPicker()
   }, [session?.user?.id])
 
   useEffect(() => {
@@ -1469,13 +1472,22 @@ function FilesTab({ session }: { session: Session }) {
   const [search, setSearch] = useState('')
   const [uploading, setUploading] = useState(false)
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
+  const [tenantId, setTenantId] = useState<string | null>(null)
 
   const BUCKET_NAME = 'dfsdfsdf'
 
+  useEffect(() => {
+    const fetchTenantId = async () => {
+      const { data: membership } = await supabase.from('memberships').select('tenant_id').eq('user_id', session.user.id).single()
+      if (membership) setTenantId(membership.tenant_id)
+    }
+    fetchTenantId()
+  }, [session.user.id])
+
   const fetchFiles = async () => {
-    if (!session?.user?.id) return
+    if (!tenantId) return
     setLoading(true)
-    const { data, error } = await supabase.storage.from(BUCKET_NAME).list(session.user.id, { limit: 100 })
+    const { data, error } = await supabase.storage.from(BUCKET_NAME).list(tenantId, { limit: 100 })
     if (error) {
       console.error('Error fetching files:', error)
     } else if (data) {
@@ -1491,17 +1503,17 @@ function FilesTab({ session }: { session: Session }) {
   }
 
   useEffect(() => {
-    fetchFiles()
-  }, [session?.user?.id])
+    if (tenantId) fetchFiles()
+  }, [tenantId])
 
   const handleUpload = async () => {
-    if (!selectedFile || !session?.user?.id) return
+    if (!selectedFile || !tenantId) return
     setUploading(true)
     try {
       const ext = selectedFile.name.split('.').pop()
       const baseName = selectedFile.name.replace(`.${ext}`, '')
       const timestamp = Date.now()
-      const uniquePath = `${session.user.id}/${timestamp}-${baseName}.${ext}`
+      const uniquePath = `${tenantId}/${timestamp}-${baseName}.${ext}`
       
       const { error } = await supabase.storage.from(BUCKET_NAME).upload(uniquePath, selectedFile, {
         cacheControl: '3600',
