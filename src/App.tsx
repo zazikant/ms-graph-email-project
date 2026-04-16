@@ -5,35 +5,141 @@ import type { Session } from '@supabase/supabase-js'
 const SUPABASE_URL = 'https://dsrsctzumggkrmyuwodw.supabase.co'
 const EDGE_FUNCTION_URL = `${SUPABASE_URL}/functions/v1/send-email-v3`
 
+type AuthView = 'login' | 'signup' | 'pending' | 'invitation_required'
+
 export default function App() {
   const [session, setSession] = useState<Session | null>(null)
   const [loading, setLoading] = useState(true)
+  const [authView, setAuthView] = useState<AuthView>('login')
+  const [pendingEmail, setPendingEmail] = useState('')
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session)
-      setLoading(false)
+      if (session) {
+        checkMembershipStatus(session)
+      } else {
+        setSession(null)
+        setLoading(false)
+      }
     })
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSession(session)
+      if (session) {
+        checkMembershipStatus(session)
+      } else {
+        setSession(null)
+        setLoading(false)
+      }
     })
 
     return () => subscription.unsubscribe()
   }, [])
+
+  const checkMembershipStatus = async (sess: Session) => {
+    try {
+      const { data: membership } = await supabase
+        .from('memberships')
+        .select('tenant_id, role')
+        .eq('user_id', sess.user.id)
+        .single()
+
+      if (membership) {
+        setSession(sess)
+        setLoading(false)
+      } else {
+        setSession(null)
+        setLoading(false)
+      }
+    } catch {
+      setSession(null)
+      setLoading(false)
+    }
+  }
 
   const handleLogin = async (email: string, password: string) => {
     const { error } = await supabase.auth.signInWithPassword({ email, password })
     if (error) throw error
   }
 
+  const handleSignup = async (email: string, password: string, fullName: string) => {
+    const { data, error } = await supabase.auth.signUp({
+      email,
+      password,
+      options: {
+        data: { full_name: fullName }
+      }
+    })
+    if (error) throw error
+
+    if (data.user) {
+      setPendingEmail(email)
+      setAuthView('pending')
+    }
+  }
+
+  const handleSignOut = () => {
+    setSession(null)
+    setAuthView('login')
+    setPendingEmail('')
+    supabase.auth.signOut()
+  }
+
   if (loading) return <div className="p-8">Loading...</div>
 
   if (!session) {
-    return <LoginForm onLogin={handleLogin} />
+    if (authView === 'pending') {
+      return <PendingApprovalView email={pendingEmail} onBackToLogin={() => setAuthView('login')} />
+    }
+    return (
+      <div className="min-h-screen bg-gray-100 py-12 px-4 flex justify-center items-center">
+        <div className="bg-white p-8 rounded shadow-md w-96 space-y-4">
+          {authView === 'login' ? (
+            <>
+              <LoginForm onLogin={handleLogin} />
+              <div className="text-center">
+                <span className="text-gray-500">Don't have an account? </span>
+                <button onClick={() => setAuthView('signup')} className="text-blue-600 hover:underline">
+                  Sign Up
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <SignupForm onSignup={handleSignup} />
+              <div className="text-center">
+                <span className="text-gray-500">Already have an account? </span>
+                <button onClick={() => setAuthView('login')} className="text-blue-600 hover:underline">
+                  Sign In
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    )
   }
 
-  return <Dashboard session={session} />
+  return <Dashboard session={session} onSignOut={handleSignOut} />
+}
+
+function PendingApprovalView({ email, onBackToLogin }: { email: string; onBackToLogin: () => void }) {
+  return (
+    <div className="min-h-screen bg-gray-100 py-12 px-4 flex justify-center items-center">
+      <div className="bg-white p-8 rounded shadow-md w-96 space-y-4 text-center">
+        <div className="text-4xl">⏳</div>
+        <h2 className="text-2xl font-bold text-yellow-600">Pending Approval</h2>
+        <p className="text-gray-600">
+          Your account has been created, but <strong>{email}</strong> is pending approval from an administrator.
+        </p>
+        <p className="text-sm text-gray-500">
+          You'll receive an email once your account is approved.
+        </p>
+        <button onClick={onBackToLogin} className="w-full bg-blue-600 text-white py-2 rounded mt-4">
+          Back to Login
+        </button>
+      </div>
+    </div>
+  )
 }
 
 function LoginForm({ onLogin }: { onLogin: (email: string, password: string) => Promise<void> }) {
@@ -55,25 +161,72 @@ function LoginForm({ onLogin }: { onLogin: (email: string, password: string) => 
   }
 
   return (
-    <div className="min-h-screen bg-gray-100 py-12 px-4 flex justify-center items-center">
-      <form onSubmit={handleSubmit} className="bg-white p-8 rounded shadow-md w-96 space-y-4">
-        <h2 className="text-2xl font-bold">Email Marketing Login</h2>
-        <input type="email" placeholder="Email" value={email} onChange={e => setEmail(e.target.value)} className="w-full border p-2 rounded" required />
-        <input type="password" placeholder="Password" value={password} onChange={e => setPassword(e.target.value)} className="w-full border p-2 rounded" required />
-        <button type="submit" disabled={loading} className="w-full bg-blue-600 text-white py-2 rounded">
-          {loading ? 'Signing in...' : 'Sign In'}
-        </button>
-        {error && <p className="text-red-600 text-sm">{error}</p>}
-      </form>
-    </div>
+    <form onSubmit={handleSubmit} className="space-y-4">
+      <h2 className="text-2xl font-bold text-center">Email Marketing Login</h2>
+      <input type="email" placeholder="Email" value={email} onChange={e => setEmail(e.target.value)} className="w-full border p-2 rounded" required />
+      <input type="password" placeholder="Password" value={password} onChange={e => setPassword(e.target.value)} className="w-full border p-2 rounded" required />
+      <button type="submit" disabled={loading} className="w-full bg-blue-600 text-white py-2 rounded">
+        {loading ? 'Signing in...' : 'Sign In'}
+      </button>
+      {error && <p className="text-red-600 text-sm">{error}</p>}
+    </form>
   )
 }
 
-function Dashboard({ session }: { session: Session }) {
-  const [activeTab, setActiveTab] = useState<'compose' | 'contacts' | 'history' | 'files' | 'lists' | 'settings'>('compose')
+function SignupForm({ onSignup }: { onSignup: (email: string, password: string, name: string) => Promise<void> }) {
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [fullName, setFullName] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setLoading(true)
+    setError('')
+    try {
+      await onSignup(email, password, fullName)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Sign up failed')
+    }
+    setLoading(false)
+  }
+
+  return (
+    <form onSubmit={handleSubmit} className="space-y-4">
+      <h2 className="text-2xl font-bold text-center">Create Account</h2>
+      <input type="text" placeholder="Full Name" value={fullName} onChange={e => setFullName(e.target.value)} className="w-full border p-2 rounded" required />
+      <input type="email" placeholder="Email" value={email} onChange={e => setEmail(e.target.value)} className="w-full border p-2 rounded" required />
+      <input type="password" placeholder="Password" value={password} onChange={e => setPassword(e.target.value)} className="w-full border p-2 rounded" required />
+      <button type="submit" disabled={loading} className="w-full bg-green-600 text-white py-2 rounded">
+        {loading ? 'Creating...' : 'Sign Up'}
+      </button>
+      {error && <p className="text-red-600 text-sm">{error}</p>}
+      <p className="text-xs text-gray-500 text-center">
+        After sign up, an administrator will need to approve your account before you can use it.
+      </p>
+    </form>
+  )
+}
+
+function Dashboard({ session, onSignOut }: { session: Session; onSignOut: () => void }) {
+  const [activeTab, setActiveTab] = useState<'compose' | 'contacts' | 'history' | 'files' | 'lists' | 'settings' | 'invitations'>('compose')
   const [pendingAttachments, setPendingAttachments] = useState<{name: string, path: string, size: number}[]>([])
   const [filterListId, setFilterListId] = useState<string | null>(null)
   const [refreshListsKey, setRefreshListsKey] = useState(0)
+  const [userRole, setUserRole] = useState<string | null>(null)
+
+  useEffect(() => {
+    const fetchRole = async () => {
+      const { data } = await supabase
+        .from('memberships')
+        .select('role')
+        .eq('user_id', session.user.id)
+        .single()
+      if (data) setUserRole(data.role)
+    }
+    fetchRole()
+  }, [session.user.id])
 
   const handleSelectList = (listId: string | null) => {
     setFilterListId(listId)
@@ -96,43 +249,53 @@ function Dashboard({ session }: { session: Session }) {
       <header className="bg-white shadow">
         <div className="max-w-7xl mx-auto px-4 py-4 flex justify-between items-center">
           <h1 className="text-xl font-bold">Email Marketing</h1>
-          <button onClick={() => supabase.auth.signOut()} className="text-sm text-gray-600 hover:text-black">Sign Out</button>
+          <div className="flex items-center gap-4">
+            {userRole === 'admin' && (
+              <button
+                onClick={() => handleTabChange('invitations')}
+                className="text-sm text-blue-600 hover:text-blue-800"
+              >
+                Invitations
+              </button>
+            )}
+            <button onClick={onSignOut} className="text-sm text-gray-600 hover:text-black">Sign Out</button>
+          </div>
         </div>
       </header>
-      
+
       <main className="flex-1 max-w-7xl mx-auto px-4 py-8 w-full">
         <div className="mb-6 flex space-x-4 border-b">
-          <button 
+          <button
             className={`pb-2 px-1 ${activeTab === 'compose' ? 'border-b-2 border-blue-600 text-blue-600' : 'text-gray-500'}`}
             onClick={() => handleTabChange('compose')}
           >
             Compose
           </button>
-          <button 
+          <button
             className={`pb-2 px-1 ${activeTab === 'contacts' ? 'border-b-2 border-blue-600 text-blue-600' : 'text-gray-500'}`}
             onClick={() => handleTabChange('contacts')}
           >
             Contacts
           </button>
-          <button 
+          <button
             className={`pb-2 px-1 ${activeTab === 'history' ? 'border-b-2 border-blue-600 text-blue-600' : 'text-gray-500'}`}
             onClick={() => handleTabChange('history')}
           >
             History
           </button>
-          <button 
+          <button
             className={`pb-2 px-1 ${activeTab === 'files' ? 'border-b-2 border-blue-600 text-blue-600' : 'text-gray-500'}`}
             onClick={() => handleTabChange('files')}
           >
             Files
           </button>
-          <button 
+          <button
             className={`pb-2 px-1 ${activeTab === 'lists' ? 'border-b-2 border-blue-600 text-blue-600' : 'text-gray-500'}`}
             onClick={() => handleTabChange('lists')}
           >
             Lists
           </button>
-          <button 
+          <button
             className={`pb-2 px-1 ${activeTab === 'settings' ? 'border-b-2 border-blue-600 text-blue-600' : 'text-gray-500'}`}
             onClick={() => handleTabChange('settings')}
           >
@@ -146,6 +309,7 @@ function Dashboard({ session }: { session: Session }) {
         {activeTab === 'files' && <FilesTab session={session} />}
         {activeTab === 'lists' && <ListsTab session={session} onSelectList={handleSelectList} onListsChanged={handleListsChanged} />}
         {activeTab === 'settings' && <SettingsTab session={session} />}
+        {activeTab === 'invitations' && <InvitationsTab session={session} />}
       </main>
     </div>
   )
@@ -1085,10 +1249,26 @@ function HistoryTab({ session }: { session: Session }) {
 
     const sendIds = dataToDelete.map(s => s.id)
 
-    await supabase.from('email_events').delete().in('send_id', sendIds)
-    await supabase.from('send_attachments').delete().in('send_id', sendIds)
-    await supabase.from('email_sends').delete().in('id', sendIds).eq('tenant_id', tenantId)
-    
+    const deleteEvents = await supabase.from('email_events').delete().in('send_id', sendIds)
+    const deleteAttachments = await supabase.from('send_attachments').delete().in('send_id', sendIds)
+    const deleteSends = await supabase.from('email_sends').delete().in('id', sendIds).eq('tenant_id', tenantId)
+
+    if (deleteEvents.error) {
+      console.error('Failed to delete events:', deleteEvents.error)
+      alert(`Failed to delete events: ${deleteEvents.error.message}`)
+      return
+    }
+    if (deleteAttachments.error) {
+      console.error('Failed to delete attachments:', deleteAttachments.error)
+      alert(`Failed to delete attachments: ${deleteAttachments.error.message}`)
+      return
+    }
+    if (deleteSends.error) {
+      console.error('Failed to delete sends:', deleteSends.error)
+      alert(`Failed to delete sends: ${deleteSends.error.message}`)
+      return
+    }
+
     setSends(sends.filter(s => !sendIds.includes(s.id)))
     const newAttachments: Record<string, Attachment[]> = {}
     Object.keys(attachments).forEach(key => {
@@ -1714,6 +1894,325 @@ function SettingsTab({ session }: { session: Session }) {
           <li>For refresh token: Use Graph Explorer → Sign in → Copy token</li>
         </ol>
       </div>
+    </div>
+  )
+}
+
+interface Invitation {
+  id: string
+  tenant_id: string
+  email: string
+  role: string
+  status: string
+  invited_by: string | null
+  created_at: string
+}
+
+function InvitationsTab({ session }: { session: Session }) {
+  const [invitations, setInvitations] = useState<Invitation[]>([])
+  const [loading, setLoading] = useState(true)
+  const [newEmail, setNewEmail] = useState('')
+  const [newRole, setNewRole] = useState('member')
+  const [inviting, setInviting] = useState(false)
+  const [error, setError] = useState('')
+  const [success, setSuccess] = useState('')
+
+  const fetchInvitations = async () => {
+    setLoading(true)
+    const { data: membership } = await supabase
+      .from('memberships')
+      .select('tenant_id, role')
+      .eq('user_id', session.user.id)
+      .single()
+
+    if (!membership || membership.role !== 'admin') {
+      setLoading(false)
+      return
+    }
+
+    const { data } = await supabase
+      .from('invitations')
+      .select('*')
+      .eq('tenant_id', membership.tenant_id)
+      .order('created_at', { ascending: false })
+
+    if (data) setInvitations(data)
+    setLoading(false)
+  }
+
+  useEffect(() => {
+    fetchInvitations()
+  }, [session.user.id])
+
+  const handleInvite = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!newEmail.trim()) return
+
+    setInviting(true)
+    setError('')
+    setSuccess('')
+
+    try {
+      const { data: membership } = await supabase
+        .from('memberships')
+        .select('tenant_id')
+        .eq('user_id', session.user.id)
+        .single()
+
+      if (!membership) throw new Error('Not a member of any tenant')
+
+      const { error: inviteError } = await supabase
+        .from('invitations')
+        .insert({
+          tenant_id: membership.tenant_id,
+          email: newEmail.toLowerCase().trim(),
+          role: newRole,
+          invited_by: session.user.id,
+          status: 'pending'
+        })
+
+      if (inviteError) {
+        if (inviteError.message.includes('duplicate')) {
+          throw new Error('An invitation for this email already exists')
+        }
+        throw inviteError
+      }
+
+      setSuccess(`Invitation sent to ${newEmail}! They will receive an email with signup instructions.`)
+      setNewEmail('')
+      fetchInvitations()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to send invitation')
+    }
+    setInviting(false)
+  }
+
+  const handleApprove = async (invitation: Invitation) => {
+    try {
+      const { data: user } = await supabase
+        .from('users')
+        .select('id, email')
+        .eq('email', invitation.email)
+        .single()
+
+      if (!user) {
+        setError(`No user found with email ${invitation.email}. They need to sign up first.`)
+        return
+      }
+
+      const { error: approveError } = await supabase
+        .from('memberships')
+        .insert({
+          tenant_id: invitation.tenant_id,
+          user_id: user.id,
+          role: invitation.role
+        })
+
+      if (approveError) {
+        if (approveError.message.includes('duplicate')) {
+          throw new Error('User is already a member')
+        }
+        throw approveError
+      }
+
+      await supabase
+        .from('invitations')
+        .update({ status: 'approved' })
+        .eq('id', invitation.id)
+
+      await fetchInvitations()
+      setSuccess(`${invitation.email} has been approved! They can now access the app.`)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to approve')
+    }
+  }
+
+  const handleReject = async (id: string) => {
+    if (!confirm('Are you sure you want to reject this invitation?')) return
+
+    const { error: rejectError } = await supabase
+      .from('invitations')
+      .update({ status: 'rejected' })
+      .eq('id', id)
+
+    if (rejectError) {
+      setError('Failed to reject invitation')
+    } else {
+      fetchInvitations()
+    }
+  }
+
+  const handleDelete = async (invitation: Invitation) => {
+    if (!confirm(`Delete invitation for ${invitation.email}? This will remove their access to the team.`)) return
+
+    setLoading(true)
+    setError('')
+    setSuccess('')
+    try {
+      // Find the user's membership and delete it
+      const { data: userData } = await supabase
+        .from('users')
+        .select('id')
+        .eq('email', invitation.email)
+        .single()
+
+      if (userData) {
+        const { error: memberError } = await supabase
+          .from('memberships')
+          .delete()
+          .eq('user_id', userData.id)
+          .eq('tenant_id', invitation.tenant_id)
+
+        if (memberError) {
+          setError('Failed to remove membership: ' + memberError.message)
+          setLoading(false)
+          return
+        }
+      }
+
+      // Delete the invitation record
+      const { error: deleteError } = await supabase
+        .from('invitations')
+        .delete()
+        .eq('id', invitation.id)
+
+      if (deleteError) {
+        setError('Failed to delete invitation')
+      } else {
+        fetchInvitations()
+        setSuccess(`Removed ${invitation.email} from the team.`)
+      }
+    } catch (err) {
+      setError('Failed to delete: ' + (err instanceof Error ? err.message : 'Unknown error'))
+    }
+    setLoading(false)
+  }
+
+  const pendingInvitations = invitations.filter(i => i.status === 'pending')
+  const processedInvitations = invitations.filter(i => i.status !== 'pending')
+
+  return (
+    <div className="bg-white p-6 rounded shadow">
+      <h2 className="text-lg font-bold mb-4">Team Invitations</h2>
+
+      <form onSubmit={handleInvite} className="flex flex-wrap gap-2 mb-6 p-4 bg-gray-50 rounded">
+        <input
+          type="email"
+          placeholder="Email address to invite"
+          value={newEmail}
+          onChange={e => setNewEmail(e.target.value)}
+          className="border p-2 rounded flex-1 min-w-64"
+          required
+        />
+        <select
+          value={newRole}
+          onChange={e => setNewRole(e.target.value)}
+          className="border p-2 rounded"
+        >
+          <option value="member">Member</option>
+          <option value="admin">Admin</option>
+        </select>
+        <button
+          type="submit"
+          disabled={inviting}
+          className="bg-blue-600 text-white px-4 py-2 rounded disabled:opacity-50"
+        >
+          {inviting ? 'Sending...' : 'Send Invitation'}
+        </button>
+      </form>
+
+      {error && <div className="mb-4 p-2 bg-red-100 text-red-700 rounded text-sm">{error}</div>}
+      {success && <div className="mb-4 p-2 bg-green-100 text-green-700 rounded text-sm">{success}</div>}
+
+      {loading ? (
+        <p>Loading...</p>
+      ) : (
+        <>
+          {pendingInvitations.length > 0 && (
+            <div className="mb-6">
+              <h3 className="font-medium mb-2 text-yellow-700">Pending Invitations</h3>
+              <table className="min-w-full text-sm mb-4">
+                <thead>
+                  <tr className="border-b">
+                    <th className="text-left p-2">Email</th>
+                    <th className="text-left p-2">Role</th>
+                    <th className="text-left p-2">Date</th>
+                    <th className="text-left p-2">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pendingInvitations.map(inv => (
+                    <tr key={inv.id} className="border-b">
+                      <td className="p-2">{inv.email}</td>
+                      <td className="p-2">{inv.role}</td>
+                      <td className="p-2">{new Date(inv.created_at).toLocaleDateString()}</td>
+                      <td className="p-2 flex gap-2">
+                        <button
+                          onClick={() => handleApprove(inv)}
+                          className="text-green-600 hover:underline text-xs"
+                        >
+                          Approve
+                        </button>
+                        <button
+                          onClick={() => handleReject(inv.id)}
+                          className="text-red-600 hover:underline text-xs"
+                        >
+                          Reject
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {processedInvitations.length > 0 && (
+            <div>
+              <h3 className="font-medium mb-2 text-gray-600">Processed Invitations</h3>
+              <table className="min-w-full text-sm">
+                <thead>
+                  <tr className="border-b">
+                    <th className="text-left p-2">Email</th>
+                    <th className="text-left p-2">Role</th>
+                    <th className="text-left p-2">Status</th>
+                    <th className="text-left p-2">Date</th>
+                    <th className="text-left p-2">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {processedInvitations.map(inv => (
+                    <tr key={inv.id} className="border-b">
+                      <td className="p-2">{inv.email}</td>
+                      <td className="p-2">{inv.role}</td>
+                      <td className="p-2">
+                        <span className={`px-2 py-1 rounded-full text-xs ${
+                          inv.status === 'approved' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
+                        }`}>
+                          {inv.status}
+                        </span>
+                      </td>
+                      <td className="p-2">{new Date(inv.created_at).toLocaleDateString()}</td>
+                      <td className="p-2">
+                        <button
+                          onClick={() => handleDelete(inv)}
+                          className="text-gray-600 hover:underline text-xs"
+                        >
+                          Delete
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {invitations.length === 0 && (
+            <p className="text-gray-400 text-center py-4">No invitations yet</p>
+          )}
+        </>
+      )}
     </div>
   )
 }

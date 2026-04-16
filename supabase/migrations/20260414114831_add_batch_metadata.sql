@@ -1,0 +1,1 @@
+-- Add DELETE policies (see 20260414110016_batch_email_and_scheduling.sql for details)
