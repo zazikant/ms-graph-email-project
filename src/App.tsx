@@ -575,9 +575,9 @@ function ComposeTab({ session, attachments, setAttachments }: { session: Session
         }
 
         const sendAtTime = sendNow ? null : new Date(sendAt).toISOString()
-        const tracking_id = crypto.randomUUID()
 
         for (const contact of listContacts) {
+          const tracking_id = crypto.randomUUID()
           await supabase.from('email_sends').insert({
             tenant_id: membership.tenant_id,
             user_id: session.user.id,
