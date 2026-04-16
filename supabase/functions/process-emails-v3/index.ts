@@ -60,8 +60,6 @@ Deno.serve(async (req) => {
     let sentCount = 0
     let failedCount = 0
     let skippedCount = 0
-    let tokenRefreshFailed = false
-    let rateLimited = false
 
     for (let i = 0; i < (scheduledEmails || []).length; i++) {
       const email = scheduledEmails[i]
@@ -79,11 +77,6 @@ Deno.serve(async (req) => {
         skippedCount++
         continue
       }
-      
-      if (tokenRefreshFailed || rateLimited) {
-        skippedCount++
-        continue
-      }
 
       try {
         await sendViaGraphWithRetry(supabase, email.tenant_id, email.user_id, email.id, email.tracking_id, 
@@ -92,9 +85,9 @@ Deno.serve(async (req) => {
       } catch (err) {
         const errMsg = err.message || ''
         if (errMsg.includes('no refresh token') || errMsg.includes('Token refresh failed') || errMsg.includes('Token revoked') || errMsg.includes('will retry when token')) {
-          console.log(`Token issue for ${email.recipient_email}. Marking as failed, continuing to next.`)
-          await supabase.from('email_sends').update({ status: 'failed', failure_reason: 'Token issue - update token in Settings' }).eq('id', email.id)
-          failedCount++
+          console.log(`Token issue for ${email.recipient_email}. Marking as scheduled to retry later.`)
+          await supabase.from('email_sends').update({ status: 'scheduled', failure_reason: 'Token issue - will retry when token is refreshed' }).eq('id', email.id)
+          skippedCount++
         } else if (errMsg.includes('rate limit') || errMsg.includes('429')) {
           console.log(`Rate limited for ${email.recipient_email}. Marking as scheduled to retry later.`)
           await supabase.from('email_sends').update({ status: 'scheduled', failure_reason: 'Rate limited - will retry' }).eq('id', email.id)
@@ -113,9 +106,7 @@ Deno.serve(async (req) => {
       processed: (scheduledEmails?.length || 0) - skippedCount, 
       sent: sentCount,
       failed: failedCount,
-      skipped: skippedCount,
-      reason: tokenRefreshFailed ? 'Token issue - update in Settings to retry' : 
-              rateLimited ? 'Rate limited, will retry on next cron run' : null
+      skipped: skippedCount
     }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     })
