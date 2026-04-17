@@ -1,9 +1,10 @@
 import { useState, useEffect } from 'react'
-import { supabase } from './supabase'
+import { supabase, supabaseUrl, supabaseAnonKey } from './supabase'
 import type { Session } from '@supabase/supabase-js'
 
-const SUPABASE_URL = 'https://dsrsctzumggkrmyuwodw.supabase.co'
-const EDGE_FUNCTION_URL = `${SUPABASE_URL}/functions/v1/send-email-v3`
+const MANAGE_TOKEN_URL = `${supabaseUrl}/functions/v1/manage-token`
+const SEND_INDIVIDUAL_URL = `${supabaseUrl}/functions/v1/send-individual`
+const SCHEDULE_BATCH_URL = `${supabaseUrl}/functions/v1/schedule-batch`
 
 type AuthView = 'login' | 'signup' | 'pending' | 'invitation_required'
 
@@ -264,7 +265,7 @@ function SignupForm({ onSignup }: { onSignup: (email: string, password: string, 
 }
 
 function Dashboard({ session, onSignOut }: { session: Session; onSignOut: () => void }) {
-  const [activeTab, setActiveTab] = useState<'compose' | 'contacts' | 'history' | 'files' | 'lists' | 'settings' | 'invitations'>('compose')
+  const [activeTab, setActiveTab] = useState<'compose' | 'contacts' | 'history' | 'files' | 'lists' | 'settings' | 'invitations' | 'batches'>('compose')
   const [pendingAttachments, setPendingAttachments] = useState<{name: string, path: string, size: number}[]>([])
   const [filterListId, setFilterListId] = useState<string | null>(null)
   const [refreshListsKey, setRefreshListsKey] = useState(0)
@@ -350,6 +351,12 @@ function Dashboard({ session, onSignOut }: { session: Session; onSignOut: () => 
             Lists
           </button>
           <button
+            className={`pb-2 px-1 ${activeTab === 'batches' ? 'border-b-2 border-blue-600 text-blue-600' : 'text-gray-500'}`}
+            onClick={() => handleTabChange('batches')}
+          >
+            Batches
+          </button>
+          <button
             className={`pb-2 px-1 ${activeTab === 'settings' ? 'border-b-2 border-blue-600 text-blue-600' : 'text-gray-500'}`}
             onClick={() => handleTabChange('settings')}
           >
@@ -362,6 +369,7 @@ function Dashboard({ session, onSignOut }: { session: Session; onSignOut: () => 
         {activeTab === 'history' && <HistoryTab session={session} />}
         {activeTab === 'files' && <FilesTab session={session} />}
         {activeTab === 'lists' && <ListsTab session={session} onSelectList={handleSelectList} onListsChanged={handleListsChanged} />}
+        {activeTab === 'batches' && <BatchesTab session={session} />}
         {activeTab === 'settings' && <SettingsTab session={session} />}
         {activeTab === 'invitations' && <InvitationsTab session={session} />}
       </main>
@@ -373,10 +381,10 @@ function ComposeTab({ session, attachments, setAttachments }: { session: Session
   const [recipient, setRecipient] = useState('')
   const [subject, setSubject] = useState('')
   const [htmlContent, setHtmlContent] = useState('')
-  const [sendNow, setSendNow] = useState(true)
-  const [sendAt, setSendAt] = useState('')
   const [status, setStatus] = useState('')
   const [loading, setLoading] = useState(false)
+  const [sendLater, setSendLater] = useState(false)
+  const [scheduledAt, setScheduledAt] = useState('')
   const [availableFiles, setAvailableFiles] = useState<{name: string, path: string, size: number}[]>([])
   const [selectedFiles, setSelectedFiles] = useState<{name: string, path: string, size: number}[]>(attachments)
   const [showFilePicker, setShowFilePicker] = useState(false)
@@ -388,9 +396,6 @@ function ComposeTab({ session, attachments, setAttachments }: { session: Session
   const [lists, setLists] = useState<{id: string, name: string}[]>([])
   const [selectedListId, setSelectedListId] = useState('')
   const [recipientMode, setRecipientMode] = useState<'single' | 'list'>('single')
-  const [pendingCount, setPendingCount] = useState(0)
-  const [scheduledCount, setScheduledCount] = useState(0)
-  const [processingCount, setProcessingCount] = useState(0)
 
   const BUCKET_NAME = 'dfsdfsdf'
 
@@ -420,25 +425,6 @@ function ComposeTab({ session, attachments, setAttachments }: { session: Session
 
       const { data: listsData } = await supabase.from('lists').select('id, name').eq('tenant_id', membership.tenant_id).order('name')
       if (listsData) setLists(listsData)
-
-      const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString()
-      
-      const { count: scheduledCount } = await supabase
-        .from('email_sends')
-        .select('*', { count: 'exact', head: true })
-        .eq('tenant_id', membership.tenant_id)
-        .eq('status', 'scheduled')
-      
-      const { count: processingCount } = await supabase
-        .from('email_sends')
-        .select('*', { count: 'exact', head: true })
-        .eq('tenant_id', membership.tenant_id)
-        .eq('status', 'processing')
-        .gt('created_at', fiveMinAgo)
-      
-      setPendingCount((scheduledCount || 0) + (processingCount || 0))
-      setScheduledCount(scheduledCount || 0)
-      setProcessingCount(processingCount || 0)
     }
     fetchContacts()
 
@@ -551,7 +537,7 @@ function ComposeTab({ session, attachments, setAttachments }: { session: Session
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setLoading(true)
-    setStatus('Preparing...')
+    setStatus('Sending...')
 
     try {
       const { data: membership } = await supabase
@@ -563,62 +549,73 @@ function ComposeTab({ session, attachments, setAttachments }: { session: Session
       if (!membership) throw new Error('No tenant found')
 
       if (recipientMode === 'list' && selectedListId) {
-        const { data: listContacts } = await supabase
-          .from('contacts')
-          .select('email')
-          .eq('tenant_id', membership.tenant_id)
-          .eq('list_id', selectedListId)
-          .neq('status', 'hardbounced')
-
-        if (!listContacts || listContacts.length === 0) {
-          throw new Error('No contacts in this list')
+        const batchBody: Record<string, unknown> = {
+          list_id: selectedListId,
+          subject,
+          content: htmlContent,
+          attachments: selectedFiles
         }
-
-        const sendAtTime = sendNow ? null : new Date(sendAt).toISOString()
-
-        for (const contact of listContacts) {
-          const tracking_id = crypto.randomUUID()
-          await supabase.from('email_sends').insert({
-            tenant_id: membership.tenant_id,
-            user_id: session.user.id,
-            tracking_id,
-            recipient_email: contact.email,
-            subject,
-            html_content: htmlContent,
-            status: 'scheduled',
-            send_at: sendAtTime
-          })
+        if (sendLater && scheduledAt) {
+          batchBody.scheduled_at = new Date(scheduledAt).toISOString()
         }
-
-        if (sendNow) {
-          await fetch(`${SUPABASE_URL}/functions/v1/process-emails-v3`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${session.access_token}` }
-          })
-        }
-
-        setStatus(`Email ${sendNow ? 'sent' : 'scheduled'} for ${listContacts.length} recipients!`)
-      } else {
-        const response = await fetch(EDGE_FUNCTION_URL, {
+        const response = await fetch(SCHEDULE_BATCH_URL, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            recipient_email: recipient,
-            subject,
-            html_content: htmlContent,
-            attachments: selectedFiles,
-            send_now: sendNow,
-            send_at: sendNow ? null : new Date(sendAt).toISOString(),
-            tenant_id: membership.tenant_id,
-            user_id: session.user.id,
-          }),
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${session.access_token}`,
+            'apikey': supabaseAnonKey
+          },
+          body: JSON.stringify(batchBody)
         })
 
         const data = await response.json()
-        
-        if (!response.ok) throw new Error(data.error || 'Failed to send')
 
-        setStatus(sendNow ? 'Email sent successfully!' : 'Email scheduled successfully!')
+        if (response.status === 403 && data.code === 'token_expired') {
+          throw new Error('Your Microsoft Graph token has expired. Please update it in Settings.')
+        }
+
+        if (!response.ok) throw new Error(data.error || 'Failed to schedule batch')
+
+        setStatus(data.message || `Batch scheduled! ${data.total_count} contacts queued. Processing will begin shortly.`)
+      } else {
+        const body: Record<string, unknown> = {
+          recipient,
+          subject,
+          content: htmlContent,
+          attachments: selectedFiles,
+          correlation_id: crypto.randomUUID()
+        }
+        if (sendLater && scheduledAt) {
+          body.scheduled_at = new Date(scheduledAt).toISOString()
+        }
+        const response = await fetch(SEND_INDIVIDUAL_URL, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${session.access_token}`,
+            'apikey': supabaseAnonKey
+          },
+          body: JSON.stringify(body)
+        })
+
+        const data = await response.json()
+
+        if (response.status === 403 && data.code === 'token_expired') {
+          throw new Error('Your Microsoft Graph token has expired. Please update your access token in Settings.')
+        }
+
+        if (response.status === 429) {
+          const retrySec = data.retry_after_seconds || 3600
+          throw new Error(`Rate limited by Microsoft. Please try again in ${Math.ceil(retrySec / 60)} minutes.`)
+        }
+
+        if (!response.ok) throw new Error(data.error || data.code || 'Failed to send')
+
+        if (data.scheduled) {
+          setStatus(`Email scheduled for ${data.scheduled_at}. It will be sent automatically.`)
+        } else {
+          setStatus('Email sent successfully!')
+        }
       }
 
       setRecipient('')
@@ -626,6 +623,8 @@ function ComposeTab({ session, attachments, setAttachments }: { session: Session
       setHtmlContent('')
       setSelectedFiles([])
       setSelectedListId('')
+      setSendLater(false)
+      setScheduledAt('')
     } catch (err) {
       setStatus(`Error: ${err instanceof Error ? err.message : 'Unknown error'}`)
     }
@@ -636,11 +635,6 @@ function ComposeTab({ session, attachments, setAttachments }: { session: Session
   return (
     <div className="bg-white p-6 rounded shadow">
       <form onSubmit={handleSubmit} className="space-y-4">
-        {pendingCount > 0 && (
-          <div className="bg-yellow-50 border border-yellow-200 p-2 rounded text-sm text-yellow-800">
-            Pending emails: <strong>{pendingCount}</strong> ({scheduledCount} scheduled, {processingCount} processing) - new batch sends may be delayed due to rate limits
-          </div>
-        )}
         <div className="flex gap-4 mb-4">
           <label className="flex items-center gap-2">
             <input type="radio" checked={recipientMode === 'single'} onChange={() => setRecipientMode('single')} />
@@ -796,21 +790,40 @@ function ComposeTab({ session, attachments, setAttachments }: { session: Session
             <p className="text-gray-400 text-sm">No files in storage. Upload files in Files tab first.</p>
           )}
         </div>
-        <div className="flex items-center gap-4">
-          <label className="flex items-center gap-2">
-            <input type="radio" checked={sendNow} onChange={() => setSendNow(true)} />
-            Send Now
+
+        <div className="border-t pt-4 mt-4">
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={sendLater}
+              onChange={(e) => {
+                setSendLater(e.target.checked)
+                if (!e.target.checked) setScheduledAt('')
+              }}
+              className="rounded"
+            />
+            <span className="text-sm font-medium">Send Later</span>
           </label>
-          <label className="flex items-center gap-2">
-            <input type="radio" checked={!sendNow} onChange={() => setSendNow(false)} />
-            Schedule
-          </label>
-          {!sendNow && (
-            <input type="datetime-local" value={sendAt} onChange={e => setSendAt(e.target.value)} className="border p-1 rounded" />
+          {sendLater && (
+            <div className="mt-2 ml-7">
+              <label className="block text-sm font-medium mb-1">Scheduled Date & Time</label>
+              <input
+                type="datetime-local"
+                value={scheduledAt}
+                onChange={(e) => setScheduledAt(e.target.value)}
+                min={new Date().toISOString().slice(0, 16)}
+                className="border p-2 rounded w-full"
+                required={sendLater}
+              />
+              <p className="text-xs text-gray-500 mt-1">
+                Email will be sent automatically at the scheduled time.
+              </p>
+            </div>
           )}
         </div>
+
         <button type="submit" disabled={loading} className="w-full bg-blue-600 text-white py-2 rounded">
-          {loading ? 'Sending...' : (sendNow ? 'Send Email' : 'Schedule Email')}
+          {loading ? 'Sending...' : sendLater ? 'Schedule Email' : 'Send Email'}
         </button>
       </form>
       {status && (
@@ -1168,6 +1181,7 @@ interface EmailSend {
   subject: string
   status: string
   sent_at: string | null
+  send_at: string | null
   created_at: string
   open_count: number
   click_count: number
@@ -1394,14 +1408,21 @@ function HistoryTab({ session }: { session: Session }) {
             <div key={s.id} className="border rounded">
               <div onClick={() => toggleExpand(s.id)} className="p-3 cursor-pointer hover:bg-gray-50 flex items-center justify-between">
                 <div className="flex-1 grid grid-cols-7 gap-2 text-sm">
-                  <div className="text-gray-500">{new Date(s.created_at).toLocaleDateString()}</div>
+                  <div className="text-gray-500">
+                    {s.send_at
+                      ? new Date(s.send_at).toLocaleDateString()
+                      : s.status === 'scheduled'
+                      ? <span className="text-blue-600">Sch: {new Date(s.send_at || s.created_at).toLocaleDateString()}</span>
+                      : new Date(s.created_at).toLocaleDateString()}
+                  </div>
                   <div className="truncate">{s.recipient_email}</div>
                   <div className="truncate">{s.subject}</div>
                   <div className="truncate text-xs text-gray-500">{atts.map(a => a.file_name).join(', ') || '-'}</div>
                   <div>
                     <span className={`px-2 py-1 rounded-full text-xs ${
-                      s.status === 'sent' ? 'bg-green-100 text-green-800' : 
-                      s.status === 'failed' ? 'bg-red-100 text-red-800' : 'bg-yellow-100 text-yellow-800'
+                      s.status === 'sent' ? 'bg-green-100 text-green-800' :
+                      s.status === 'failed' ? 'bg-red-100 text-red-800' :
+                      s.status === 'scheduled' ? 'bg-blue-100 text-blue-800' : 'bg-yellow-100 text-yellow-800'
                     }`}>
                       {s.status}
                     </span>
@@ -1819,148 +1840,273 @@ function ListsTab({ session, onSelectList, onListsChanged }: { session: Session,
   )
 }
 
+type BatchRow = {
+  id: string
+  subject: string
+  status: string
+  total_count: number
+  sent_count: number
+  failed_count: number
+  created_at: string
+  started_at: string | null
+  completed_at: string | null
+  list_id: string | null
+  scheduled_at: string | null
+}
+
+function BatchesTab({ session }: { session: Session }) {
+  const [batches, setBatches] = useState<BatchRow[]>([])
+  const [loading, setLoading] = useState(true)
+  const [expandedId, setExpandedId] = useState<string | null>(null)
+  const [recipients, setRecipients] = useState<Record<string, { email: string; status: string; error_detail: string | null }[]>>({})
+
+  const fetchBatches = async () => {
+    setLoading(true)
+    const { data: membership } = await supabase.from('memberships').select('tenant_id').eq('user_id', session.user.id).single()
+    if (!membership) { setLoading(false); return }
+
+    const { data } = await supabase.from('batches').select('*').eq('tenant_id', membership.tenant_id).order('created_at', { ascending: false }).limit(50)
+    if (data) setBatches(data as BatchRow[])
+    setLoading(false)
+  }
+
+  useEffect(() => { fetchBatches() }, [session.user.id])
+
+  useEffect(() => {
+    const interval = setInterval(fetchBatches, 10000)
+    return () => clearInterval(interval)
+  }, [session.user.id])
+
+  const fetchRecipients = async (batchId: string) => {
+    if (recipients[batchId]) {
+      setExpandedId(expandedId === batchId ? null : batchId)
+      return
+    }
+    const { data } = await supabase.from('recipient_list').select('email, status, error_detail').eq('batch_id', batchId).order('created_at')
+    if (data) {
+      setRecipients(prev => ({ ...prev, [batchId]: data as { email: string; status: string; error_detail: string | null }[] }))
+      setExpandedId(batchId)
+    }
+  }
+
+  const statusColor = (status: string) => {
+    switch (status) {
+      case 'pending': return 'bg-yellow-100 text-yellow-800'
+      case 'processing': return 'bg-blue-100 text-blue-800'
+      case 'completed': return 'bg-green-100 text-green-800'
+      case 'failed': return 'bg-red-100 text-red-800'
+      case 'paused': return 'bg-gray-100 text-gray-800'
+      default: return 'bg-gray-100 text-gray-800'
+    }
+  }
+
+  const listNames = async () => {}
+
+  return (
+    <div className="bg-white p-6 rounded shadow">
+      <div className="flex justify-between items-center mb-4">
+        <h2 className="text-lg font-bold">Batch Sends</h2>
+        <button onClick={fetchBatches} className="text-sm text-blue-600 hover:underline">Refresh</button>
+      </div>
+      {loading ? <p>Loading...</p> : batches.length === 0 ? <p className="text-gray-500">No batch sends yet. Use "Send to List" in Compose to create one.</p> : (
+        <div className="space-y-3">
+          {batches.map(batch => {
+            const progress = batch.total_count > 0 ? Math.round(((batch.sent_count || 0) + (batch.failed_count || 0)) / batch.total_count * 100) : 0
+            return (
+              <div key={batch.id} className="border rounded p-3">
+                <div className="flex justify-between items-center cursor-pointer" onClick={() => fetchRecipients(batch.id)}>
+                  <div>
+                    <div className="font-medium">{batch.subject}</div>
+                    <div className="text-xs text-gray-500">
+                      Created: {new Date(batch.created_at).toLocaleString()}
+                      {batch.scheduled_at && batch.status === 'scheduled' && (
+                        <span className="ml-2 text-blue-600">• Scheduled: {new Date(batch.scheduled_at).toLocaleString()}</span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <span className={`px-2 py-1 rounded text-xs font-medium ${statusColor(batch.status)}`}>{batch.status}</span>
+                    <span className="text-sm">{batch.sent_count || 0}/{batch.total_count || 0} sent</span>
+                    {progress < 100 && <span className="text-xs text-gray-400">{progress}%</span>}
+                  </div>
+                </div>
+                {batch.total_count > 0 && (
+                  <div className="mt-2 w-full bg-gray-200 rounded-full h-2">
+                    <div className="bg-green-500 h-2 rounded-full" style={{ width: `${Math.round((batch.sent_count || 0) / batch.total_count * 100)}%` }}></div>
+                    {(batch.failed_count || 0) > 0 && <div className="bg-red-400 h-2 rounded-full -mt-2" style={{ width: `${Math.round((batch.failed_count || 0) / batch.total_count * 100)}%`, marginLeft: `${Math.round((batch.sent_count || 0) / batch.total_count * 100)}%` }}></div>}
+                  </div>
+                )}
+                {expandedId === batch.id && recipients[batch.id] && (
+                  <div className="mt-3 border-t pt-2">
+                    <table className="w-full text-xs">
+                      <thead><tr className="text-left text-gray-500"><th>Email</th><th>Status</th><th>Error</th></tr></thead>
+                      <tbody>
+                        {recipients[batch.id].slice(0, 20).map((r, i) => (
+                          <tr key={i} className="border-b border-gray-100">
+                            <td>{r.email}</td>
+                            <td><span className={`px-1 rounded text-xs ${r.status === 'sent' ? 'bg-green-50 text-green-700' : r.status === 'failed' ? 'bg-red-50 text-red-700' : r.status === 'skipped' ? 'bg-gray-50 text-gray-700' : 'bg-yellow-50 text-yellow-700'}`}>{r.status}</span></td>
+                            <td className="text-red-500 max-w-xs truncate">{r.error_detail || ''}</td>
+                          </tr>
+                        ))}
+                        {recipients[batch.id].length > 20 && <tr><td colSpan={3} className="text-gray-400 py-1">...and {recipients[batch.id].length - 20} more</td></tr>}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function SettingsTab({ session }: { session: Session }) {
-  const [clientId, setClientId] = useState('')
-  const [clientSecret, setClientSecret] = useState('')
-  const [tenantId, setTenantId] = useState('')
-  const [refreshToken, setRefreshToken] = useState('')
   const [accessToken, setAccessToken] = useState('')
+  const [tokenStatus, setTokenStatus] = useState<{ has_token: boolean, status: string, retry_after: string | null, send_count: number, expires_at: string | null } | null>(null)
   const [status, setStatus] = useState('')
   const [loading, setLoading] = useState(false)
 
-  useEffect(() => {
-    if (!session?.user?.id) return
-    supabase.from('memberships').select('ms_access_token, ms_refresh_token, tenant_id')
-      .eq('user_id', session.user.id).single()
-      .then(({ data }) => {
-        if (data?.ms_access_token) setAccessToken(data.ms_access_token)
-        if (data?.ms_refresh_token) setRefreshToken(data.ms_refresh_token)
-        if (data?.tenant_id) {
-          supabase.from('tenants').select('ms_client_id, ms_client_secret, ms_tenant_id')
-            .eq('id', data.tenant_id).single()
-            .then(({ data: tenant }) => {
-              if (tenant?.ms_client_id) setClientId(tenant.ms_client_id)
-              if (tenant?.ms_client_secret) setClientSecret(tenant.ms_client_secret)
-              if (tenant?.ms_tenant_id) setTenantId(tenant.ms_tenant_id)
-            })
-        }
+  const fetchTokenStatus = async () => {
+    try {
+      const res = await fetch(MANAGE_TOKEN_URL, {
+        method: 'GET',
+        headers: { 'Authorization': `Bearer ${session.access_token}`, 'apikey': supabaseAnonKey }
       })
+      if (res.ok) {
+        const data = await res.json()
+        setTokenStatus(data)
+      }
+    } catch {}
+  }
+
+  useEffect(() => {
+    fetchTokenStatus()
   }, [session?.user?.id])
 
-  const saveCredentials = async (e: React.FormEvent) => {
+  const saveToken = async (e: React.FormEvent) => {
     e.preventDefault()
+    if (!accessToken.trim()) return
     setLoading(true)
-    setStatus('Saving...')
-    
-    if (!session?.user?.id) {
-      setStatus('Error: No session')
-      setLoading(false)
-      return
-    }
+    setStatus('Saving token...')
 
-    const { data: membership } = await supabase.from('memberships').select('tenant_id').eq('user_id', session.user.id).single()
-    if (!membership) {
-      setStatus('Error: No tenant found')
-      setLoading(false)
-      return
-    }
+    try {
+      const res = await fetch(MANAGE_TOKEN_URL, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${session.access_token}`,
+          'apikey': supabaseAnonKey
+        },
+        body: JSON.stringify({ access_token: accessToken.trim() })
+      })
 
-    const { error: tenantErr } = await supabase.from('tenants').update({
-      ms_client_id: clientId,
-      ms_client_secret: clientSecret,
-      ms_tenant_id: tenantId
-    }).eq('id', membership.tenant_id)
-
-    const { error: memberErr } = await supabase.from('memberships').update({
-      ms_refresh_token: refreshToken,
-      ms_access_token: accessToken
-    }).eq('user_id', session.user.id)
-
-    if (tenantErr || memberErr) {
-      setStatus(`Error: ${tenantErr?.message || memberErr?.message}`)
-    } else {
-      setStatus('Saved!')
+      const data = await res.json()
+      if (!res.ok) {
+        setStatus(`Error: ${data.error || 'Failed to save token'}`)
+      } else {
+        setStatus('Token saved successfully! Status: active')
+        setAccessToken('')
+        fetchTokenStatus()
+      }
+    } catch (err) {
+      setStatus(`Error: ${err instanceof Error ? err.message : 'Unknown error'}`)
     }
     setLoading(false)
   }
 
-  const testConnection = async () => {
-    if (!accessToken) {
-      setStatus('No access token to test')
-      return
-    }
+  const deleteToken = async () => {
+    if (!confirm('Remove your Microsoft Graph token? You will need to paste a new one to send emails.')) return
     setLoading(true)
-    setStatus('Testing...')
+    setStatus('Removing token...')
+
     try {
-      const res = await fetch('https://graph.microsoft.com/v1.0/me', {
-        headers: { 'Authorization': 'Bearer ' + accessToken }
+      const res = await fetch(MANAGE_TOKEN_URL, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${session.access_token}`, 'apikey': supabaseAnonKey }
       })
-      if (res.ok) {
-        setStatus('✅ Connection successful!')
+
+      const data = await res.json()
+      if (!res.ok) {
+        setStatus(`Error: ${data.error || 'Failed to delete token'}`)
       } else {
-        await res.text()
-        setStatus(`❌ Failed: ${res.status}`)
+        setStatus('Token removed')
+        setTokenStatus(null)
+        setAccessToken('')
       }
     } catch (err) {
-      setStatus(`❌ Error: ${err}`)
+      setStatus(`Error: ${err instanceof Error ? err.message : 'Unknown error'}`)
     }
     setLoading(false)
+  }
+
+  const statusColor = () => {
+    if (!tokenStatus || !tokenStatus.has_token) return 'text-red-600 bg-red-50'
+    if (tokenStatus.status === 'token_expired') return 'text-red-600 bg-red-50'
+    if (tokenStatus.retry_after && new Date(tokenStatus.retry_after) > new Date()) return 'text-yellow-600 bg-yellow-50'
+    return 'text-green-600 bg-green-50'
+  }
+
+  const statusText = () => {
+    if (!tokenStatus || !tokenStatus.has_token) return 'No token configured'
+    if (tokenStatus.status === 'token_expired') return 'Token expired - please paste a new access token'
+    if (tokenStatus.retry_after && new Date(tokenStatus.retry_after) > new Date()) {
+      const mins = Math.ceil((new Date(tokenStatus.retry_after).getTime() - Date.now()) / 60000)
+      return `Rate limited - retry in ${mins} min`
+    }
+    return `Active (sends today: ${tokenStatus.send_count ?? 0})`
   }
 
   return (
     <div className="bg-white p-6 rounded shadow max-w-lg">
-      <h2 className="text-lg font-bold mb-4">Microsoft Graph Settings</h2>
-      <form onSubmit={saveCredentials} className="space-y-4">
-        <div>
-          <label className="block text-sm font-medium mb-1">Client ID (App ID)</label>
-          <input type="text" value={clientId} onChange={e => setClientId(e.target.value)} 
-            className="w-full border p-2 rounded text-sm" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" />
+      <h2 className="text-lg font-bold mb-4">Microsoft Graph Token</h2>
+
+      {tokenStatus && (
+        <div className={`p-3 rounded mb-4 text-sm font-medium ${statusColor()}`}>
+          Status: {statusText()}
         </div>
-        <div>
-          <label className="block text-sm font-medium mb-1">Client Secret</label>
-          <input type="password" value={clientSecret} onChange={e => setClientSecret(e.target.value)} 
-            className="w-full border p-2 rounded text-sm" placeholder="Your client secret" />
-        </div>
-        <div>
-          <label className="block text-sm font-medium mb-1">Tenant ID</label>
-          <input type="text" value={tenantId} onChange={e => setTenantId(e.target.value)} 
-            className="w-full border p-2 rounded text-sm" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" />
-        </div>
-        <div>
-          <label className="block text-sm font-medium mb-1">Refresh Token</label>
-          <textarea value={refreshToken} onChange={e => setRefreshToken(e.target.value)} 
-            rows={3} className="w-full border p-2 rounded text-sm font-mono" placeholder="Paste refresh token..." />
-          <p className="text-xs text-gray-500 mt-1">Used to auto-refresh access token</p>
-        </div>
+      )}
+
+      <form onSubmit={saveToken} className="space-y-4">
         <div>
           <label className="block text-sm font-medium mb-1">Access Token</label>
-          <textarea value={accessToken} onChange={e => setAccessToken(e.target.value)} 
-            rows={3} className="w-full border p-2 rounded text-sm font-mono" placeholder="Paste access token..." />
+          <textarea value={accessToken} onChange={e => setAccessToken(e.target.value)}
+            rows={4} className="w-full border p-2 rounded text-sm font-mono" placeholder="Paste your Microsoft Graph access token here..." />
+          <p className="text-xs text-gray-500 mt-1">
+            Tokens expire in 60-90 minutes. Get a new one from 
+            <a href="https://developer.microsoft.com/en-us/graph/graph-explorer" target="_blank" className="text-blue-600 underline ml-1">Graph Explorer</a>
+          </p>
         </div>
         <div className="flex gap-2">
-          <button type="submit" disabled={loading} className="flex-1 bg-gray-800 text-white py-2 rounded">
-            {loading ? 'Saving...' : 'Save All'}
+          <button type="submit" disabled={loading || !accessToken.trim()} className="flex-1 bg-gray-800 text-white py-2 rounded disabled:opacity-50">
+            {loading ? 'Saving...' : 'Save Token'}
           </button>
-          <button type="button" onClick={testConnection} disabled={loading || !accessToken} 
-            className="bg-green-600 text-white py-2 px-4 rounded disabled:opacity-50">
-            Test
-          </button>
+          {tokenStatus?.has_token && (
+            <button type="button" onClick={deleteToken} disabled={loading}
+              className="bg-red-600 text-white py-2 px-4 rounded disabled:opacity-50">
+              Remove
+            </button>
+          )}
         </div>
       </form>
       {status && (
-        <div className={`mt-4 p-2 rounded text-sm ${status.includes('❌') ? 'bg-red-100 text-red-700' : status.includes('✅') ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-700'}`}>
+        <div className={`mt-4 p-2 rounded text-sm ${status.startsWith('Error') ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-800'}`}>
           {status}
         </div>
       )}
       <div className="mt-6 p-4 bg-blue-50 rounded text-sm">
-        <h3 className="font-medium mb-2">How to get credentials:</h3>
+        <h3 className="font-medium mb-2">How to get an access token:</h3>
         <ol className="list-decimal list-inside space-y-1 text-gray-600">
-          <li>Go to <a href="https://portal.azure.com" target="_blank" className="text-blue-600 underline">Azure Portal</a></li>
-          <li>Register an app or use existing</li>
-          <li>Copy App (client) ID and Directory (tenant) ID</li>
-          <li>Create a client secret in "Certificates & secrets"</li>
-          <li>For refresh token: Use Graph Explorer → Sign in → Copy token</li>
+          <li>Go to <a href="https://developer.microsoft.com/en-us/graph/graph-explorer" target="_blank" className="text-blue-600 underline">Graph Explorer</a></li>
+          <li>Sign in with your Microsoft account</li>
+          <li>Consent to <code className="bg-gray-200 px-1 rounded text-xs">Mail.Send</code> permission</li>
+          <li>Copy the access token from the request headers</li>
+          <li>Paste it above and click Save Token</li>
         </ol>
+        <p className="mt-3 text-gray-500 text-xs">
+          Note: Access tokens expire in 60-90 minutes. When expired, paste a new token.
+        </p>
       </div>
     </div>
   )
