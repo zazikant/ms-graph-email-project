@@ -1900,8 +1900,6 @@ function BatchesTab({ session }: { session: Session }) {
     }
   }
 
-  const listNames = async () => {}
-
   return (
     <div className="bg-white p-6 rounded shadow">
       <div className="flex justify-between items-center mb-4">
