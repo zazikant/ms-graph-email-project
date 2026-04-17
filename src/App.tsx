@@ -126,6 +126,22 @@ export default function App() {
           setSession(sessData.session)
         }
       } else {
+        // No invitation found — create a pending invitation record so admins can approve
+        // This allows signup-first flow: user signs up → admin sees pending invite → approves
+        const { error: inviteError } = await supabase
+          .from('invitations')
+          .insert({
+            tenant_id: null, // null = universal pending, any admin can approve
+            email: email.toLowerCase(),
+            role: 'member',
+            invited_by: null, // signup-first flow, no inviter
+            status: 'pending'
+          })
+
+        if (inviteError) {
+          console.error('Failed to create pending invitation:', inviteError)
+        }
+
         setPendingEmail(email)
         setAuthView('pending')
       }
@@ -2145,7 +2161,8 @@ function InvitationsTab({ session }: { session: Session }) {
     const { data } = await supabase
       .from('invitations')
       .select('*')
-      .eq('tenant_id', membership.tenant_id)
+      .or(`tenant_id.eq.${membership.tenant_id},tenant_id.is.null`)
+      .eq('status', 'pending')
       .order('created_at', { ascending: false })
 
     if (data) setInvitations(data)
@@ -2201,6 +2218,19 @@ function InvitationsTab({ session }: { session: Session }) {
 
   const handleApprove = async (invitation: Invitation) => {
     try {
+      // Get admin's tenant_id to add the user to
+      const { data: adminMembership } = await supabase
+        .from('memberships')
+        .select('tenant_id')
+        .eq('user_id', session.user.id)
+        .eq('role', 'admin')
+        .single()
+
+      if (!adminMembership) {
+        setError('You must be an admin to approve invitations')
+        return
+      }
+
       const { data: user } = await supabase
         .from('users')
         .select('id, email')
@@ -2215,7 +2245,7 @@ function InvitationsTab({ session }: { session: Session }) {
       const { error: approveError } = await supabase
         .from('memberships')
         .insert({
-          tenant_id: invitation.tenant_id,
+          tenant_id: adminMembership.tenant_id, // Use admin's tenant, not invitation's
           user_id: user.id,
           role: invitation.role
         })

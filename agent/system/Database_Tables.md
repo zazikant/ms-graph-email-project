@@ -12,57 +12,7 @@ Individual email send tracking. Used by `send-individual`, `process-scheduled-in
 | Column | Type | Nullable | Default | Notes |
 |--------|------|---------|---------|-------|
 | `id` | uuid | NO | `gen_randomuuid()` | PK |
-| `tenant_id` | uuid | NO | | FK → `tenants` |
-| `tracking_id` | uuid | NO | `gen_randomuuid()` | Unique tracking ID |
-| `recipient_email` | text | NO | | |
-| `subject` | text | NO | | |
-| `html_content` | text | NO | | |
-| `status` | text | YES | `'draft'` | Check: `draft\|scheduled\|processing\|sent\|failed` |
-| `send_at` | timestamptz | YES | | Scheduled send time |
-| `sent_at` | timestamptz | YES | | Actual send time |
-| `created_at` | timestamptz | YES | `now()` | |
-| `updated_at` | timestamptz | YES | `now()` | |
-| `open_count` | integer | YES | `0` | |
-| `click_count` | integer | YES | `0` | |
-| `failure_reason` | text | YES | | |
-| `user_id` | uuid | YES | | FK → `auth.users` |
-| `attachments` | jsonb | YES | `'[]'::jsonb` | `[{name, path, size}]` — populated for sends with attachments |
-
----
-
-### `batches`
-Batch send records. Used by `schedule-batch` and `process-batches`.
-
-| Column | Type | Nullable | Default | Notes |
-|--------|------|---------|---------|-------|
-| `id` | uuid | NO | `gen_randomuuid()` | PK |
-| `tenant_id` | uuid | NO | | FK → `tenants` |
-| `sent_by` | uuid | NO | | FK → `auth.users` |
-| `user_id` | uuid | YES | | FK → `auth.users` |
-| `list_id` | uuid | YES | | FK → `lists` |
-| `subject` | text | NO | | |
-| `content` | text | NO | | |
-| `attachments` | jsonb | YES | `'[]'::jsonb` | `[{name, path, size}]` |
-| `scheduled_at` | timestamptz | YES | | If set, batch is scheduled |
-| `status` | batch_status (enum) | YES | `'pending'` | `pending\|scheduled\|processing\|completed\|paused\|failed` |
-| `total_count` | integer | YES | `0` | |
-| `sent_count` | integer | YES | `0` | |
-| `failed_count` | integer | YES | `0` | |
-| `created_at` | timestamptz | YES | `now()` | |
-| `started_at` | timestamptz | YES | | When processing began |
-| `completed_at` | timestamptz | YES | | When processing ended |
-| `metadata` | jsonb | YES | `'{}'::jsonb` | |
-
----
-
-### `recipient_list`
-Per-recipient entries for each batch. Used by `process-batches`.
-
-| Column | Type | Nullable | Default | Notes |
-|--------|------|---------|---------|-------|
-| `id` | uuid | NO | `gen_randomuuid()` | PK |
-| `tenant_id` | uuid | NO | | FK → `tenants` |
-| `batch_id` | uuid | NO | | FK → `batches` |
+| `tenant_id` | uuid | YES | | FK → `tenants` (null = universal pending, visible to all admins) |
 | `email` | text | NO | | |
 | `status` | recipient_status (enum) | YES | `'pending'` | `pending\|sent\|failed\|skipped` |
 | `error_detail` | text | YES | | |
@@ -148,7 +98,7 @@ Mirror of `auth.users` for local reference.
 ---
 
 ### `invitations`
-Pending invites to join a tenant.
+Pending invites to join a tenant. Supports "signup-first" flow where `tenant_id` can be null — these universal pending invites are visible to all admins and the approving admin adds the user to their own tenant.
 
 | Column | Type | Nullable | Default | Notes |
 |--------|------|---------|---------|-------|
