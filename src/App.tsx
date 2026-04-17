@@ -5,6 +5,7 @@ import type { Session } from '@supabase/supabase-js'
 const MANAGE_TOKEN_URL = `${supabaseUrl}/functions/v1/manage-token`
 const SEND_INDIVIDUAL_URL = `${supabaseUrl}/functions/v1/send-individual`
 const SCHEDULE_BATCH_URL = `${supabaseUrl}/functions/v1/schedule-batch`
+const CONFIRM_USER_URL = `${supabaseUrl}/functions/v1/confirm-user`
 
 type AuthView = 'login' | 'signup' | 'pending' | 'invitation_required'
 
@@ -2261,6 +2262,14 @@ function InvitationsTab({ session }: { session: Session }) {
         .from('invitations')
         .update({ status: 'approved' })
         .eq('id', invitation.id)
+
+      // Auto-confirm user's email so they can login immediately
+      const { error: confirmError } = await supabase.functions.invoke(CONFIRM_USER_URL, {
+        body: { email: invitation.email }
+      })
+      if (confirmError) {
+        console.error('Failed to confirm user email:', confirmError)
+      }
 
       await fetchInvitations()
       setSuccess(`${invitation.email} has been approved! They can now access the app.`)
