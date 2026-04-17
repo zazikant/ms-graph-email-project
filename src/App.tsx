@@ -1408,12 +1408,12 @@ function HistoryTab({ session }: { session: Session }) {
             <div key={s.id} className="border rounded">
               <div onClick={() => toggleExpand(s.id)} className="p-3 cursor-pointer hover:bg-gray-50 flex items-center justify-between">
                 <div className="flex-1 grid grid-cols-7 gap-2 text-sm">
-                  <div className="text-gray-500">
+                  <div className="text-gray-500 text-xs">
                     {s.send_at
-                      ? new Date(s.send_at).toLocaleDateString()
+                      ? new Date(s.send_at).toLocaleString()
                       : s.status === 'scheduled'
-                      ? <span className="text-blue-600">Sch: {new Date(s.send_at || s.created_at).toLocaleDateString()}</span>
-                      : new Date(s.created_at).toLocaleDateString()}
+                      ? <span className="text-blue-600">Sch: {new Date(s.send_at || s.created_at).toLocaleString()}</span>
+                      : new Date(s.created_at).toLocaleString()}
                   </div>
                   <div className="truncate">{s.recipient_email}</div>
                   <div className="truncate">{s.subject}</div>
