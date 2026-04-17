@@ -7,7 +7,7 @@
 ## Core Email Tables
 
 ### `email_sends`
-Individual email send tracking. Used by `send-individual` and `process-scheduled-individual`.
+Individual email send tracking. Used by `send-individual`, `process-scheduled-individual`, and `process-batches`.
 
 | Column | Type | Nullable | Default | Notes |
 |--------|------|---------|---------|-------|
@@ -26,6 +26,7 @@ Individual email send tracking. Used by `send-individual` and `process-scheduled
 | `click_count` | integer | YES | `0` | |
 | `failure_reason` | text | YES | | |
 | `user_id` | uuid | YES | | FK → `auth.users` |
+| `attachments` | jsonb | YES | `'[]'::jsonb` | `[{name, path, size}]` — populated for sends with attachments |
 
 ---
 
@@ -72,7 +73,7 @@ Per-recipient entries for each batch. Used by `process-batches`.
 ---
 
 ### `send_attachments`
-Attachments sent with individual emails. Used by `send-individual` and `process-scheduled-individual`.
+Attachments sent with emails. Used by `send-individual`, `process-scheduled-individual`, and `process-batches`.
 
 | Column | Type | Nullable | Default | Notes |
 |--------|------|---------|---------|-------|

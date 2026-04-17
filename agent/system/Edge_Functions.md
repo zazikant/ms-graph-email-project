@@ -39,11 +39,19 @@
 | 429 | `{ "error": "Rate limited", "retry_after_seconds": 3600 }` |
 | 500 | `{ "error": "..." }` |
 
+### Attachment Recording
+
+Both `email_sends.attachments` (JSONB) and `send_attachments` (rows) are populated on success:
+- `email_sends.attachments` = `[{name, path, size}]` — set at INSERT time (line 107 for scheduled, line 156 for immediate)
+- `send_attachments` rows inserted after successful send (line 301-308)
+
+**Important**: `send_attachments.storage_path` column (NOT `file_path`) — Supabase silently ignores unknown columns in INSERTs.
+
 ### Tables Used
 - `user_ms_graph_links` — token retrieval (direct query, NOT RPC)
 - `contacts` — hardbounce check
-- `email_sends` — insert before send, update after
-- `send_attachments` — insert on success
+- `email_sends` — insert before send, update after (includes `attachments` jsonb)
+- `send_attachments` — insert on success (uses `storage_path` column)
 - `memberships` — tenant_id lookup
 
 ### RPCs Called

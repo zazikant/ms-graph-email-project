@@ -104,6 +104,7 @@ Deno.serve(async (req) => {
           status: "scheduled",
           send_at: parsedScheduledAt!.toISOString(),
           user_id: userId,
+          attachments: attachments || [],
         }).select("id").maybeSingle()
         if (!sendInsertError && sendRow) {
           sendId = sendRow.id
@@ -151,7 +152,8 @@ Deno.serve(async (req) => {
         subject,
         html_content: content,
         status: 'processing',
-        user_id: userId
+        user_id: userId,
+        attachments: attachments || [],
       }).select('id').single()
       if (!sendInsertError && sendRow) {
         sendId = sendRow.id
@@ -300,10 +302,11 @@ Deno.serve(async (req) => {
           const attRows = attachments.map((a: { name: string; path: string; size: number }) => ({
             send_id: sendId,
             file_name: a.name,
-            file_path: a.path,
+            storage_path: a.path,
             file_size: a.size
           }))
-          await supabase.from('send_attachments').insert(attRows)
+          const { error: attError } = await supabase.from('send_attachments').insert(attRows)
+          if (attError) console.error('send_attachments insert error:', attError)
         }
       } else {
         await supabase.from('email_sends').update({ status: 'failed', failure_reason: errorDetail }).eq('id', sendId)
