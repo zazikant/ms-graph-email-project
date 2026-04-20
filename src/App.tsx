@@ -877,11 +877,14 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
   const [newListId, setNewListId] = useState('')
   const [searchEmail, setSearchEmail] = useState('')
   const [searchName, setSearchName] = useState('')
+  const [exactMatch, setExactMatch] = useState(false)
   const [filterStatus, setFilterStatus] = useState('')
   const [filterList, setFilterList] = useState('')
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
   const [uploading, setUploading] = useState(false)
+  const [currentPage, setCurrentPage] = useState(1)
+  const CONTACTS_PER_PAGE = 10
 
   const fetchData = async () => {
     setLoading(true)
@@ -1069,15 +1072,52 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
   const hasFilters = searchEmail || searchName || filterStatus || filterList || dateFrom || dateTo
 
   const filteredContacts = contacts.filter(c => {
-    const matchesEmail = !searchEmail || c.email.toLowerCase().includes(searchEmail.toLowerCase())
-    const matchesName = !searchName || (c.name && c.name.toLowerCase().includes(searchName.toLowerCase()))
+    const emailMatch = exactMatch
+      ? !searchEmail || c.email.toLowerCase() === searchEmail.toLowerCase()
+      : !searchEmail || c.email.toLowerCase().includes(searchEmail.toLowerCase())
+    const nameMatch = exactMatch
+      ? !searchName || (c.name && c.name.toLowerCase() === searchName.toLowerCase())
+      : !searchName || (c.name && c.name.toLowerCase().includes(searchName.toLowerCase()))
     const matchesStatus = !filterStatus || c.status === filterStatus
     const matchesList = !filterList || c.list_id === filterList
     const contactDate = new Date(c.created_at)
     const matchesFrom = !dateFrom || contactDate >= new Date(dateFrom)
     const matchesTo = !dateTo || contactDate <= new Date(dateTo + 'T23:59:59')
-    return matchesEmail && matchesName && matchesStatus && matchesList && matchesFrom && matchesTo
+    return emailMatch && nameMatch && matchesStatus && matchesList && matchesFrom && matchesTo
   })
+
+  const totalContacts = filteredContacts.length
+  const totalPages = Math.ceil(totalContacts / CONTACTS_PER_PAGE)
+  const showingFrom = totalContacts === 0 ? 0 : (currentPage - 1) * CONTACTS_PER_PAGE + 1
+  const showingTo = Math.min(currentPage * CONTACTS_PER_PAGE, totalContacts)
+  const paginatedContacts = filteredContacts.slice((currentPage - 1) * CONTACTS_PER_PAGE, currentPage * CONTACTS_PER_PAGE)
+
+  const handlePrevPage = () => {
+    if (currentPage > 1) setCurrentPage(currentPage - 1)
+  }
+
+  const handleNextPage = () => {
+    if (currentPage < totalPages) setCurrentPage(currentPage + 1)
+  }
+
+  const hasSearchFilters = searchEmail || searchName
+
+  const deleteFilteredContacts = async () => {
+    const contactsToDelete = hasSearchFilters ? filteredContacts : contacts
+    if (contactsToDelete.length === 0) return
+
+    const confirmMsg = hasSearchFilters
+      ? `Delete ${contactsToDelete.length} filtered contacts? This cannot be undone.`
+      : `Delete ALL ${contactsToDelete.length} contacts? This cannot be undone.`
+
+    if (!confirm(confirmMsg)) return
+
+    const contactIds = contactsToDelete.map(c => c.id)
+    for (const id of contactIds) {
+      await supabase.from('contacts').delete().eq('id', id)
+    }
+    fetchData()
+  }
 
   const getListName = (listId: string | null) => {
     if (!listId) return '-'
@@ -1136,6 +1176,18 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
           onChange={e => setSearchName(e.target.value)}
           className="border p-2 rounded text-sm w-32"
         />
+        <input
+          id="exactMatchContact"
+          type="checkbox"
+          checked={exactMatch}
+          onChange={e => setExactMatch(e.target.checked)}
+        />
+        <label htmlFor="exactMatchContact" className="text-sm">Exact</label>
+        {contacts.length > 0 && (
+          <button onClick={deleteFilteredContacts} className="bg-red-600 text-white px-3 py-2 rounded text-sm hover:bg-red-700">
+            {hasSearchFilters ? `Delete (${filteredContacts.length})` : `Delete All (${contacts.length})`}
+          </button>
+        )}
         <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className="border p-2 rounded text-sm">
           <option value="">All Status</option>
           <option value="subscribed">Subscribed</option>
@@ -1155,7 +1207,8 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
       </div>
 
       {loading ? <p>Loading...</p> : (
-        <table className="min-w-full text-sm">
+        <>
+          <table className="min-w-full text-sm">
           <thead>
             <tr className="border-b">
               <th className="text-left p-2">Email</th>
@@ -1167,7 +1220,7 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
             </tr>
           </thead>
           <tbody>
-            {filteredContacts.map(c => (
+            {paginatedContacts.map(c => (
               <tr key={c.id} className="border-b">
                 <td className="p-2">{c.email}</td>
                 <td className="p-2">{c.name || '-'}</td>
@@ -1183,9 +1236,21 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
                 </td>
               </tr>
             ))}
+            {paginatedContacts.length === 0 && filteredContacts.length > 0 && <tr><td colSpan={6} className="p-4 text-center">No contacts on this page</td></tr>}
             {filteredContacts.length === 0 && <tr><td colSpan={6} className="p-4 text-center">No contacts found</td></tr>}
           </tbody>
         </table>
+        {totalPages >= 1 && (
+          <div className="flex justify-between items-center mt-4 pt-3 border-t">
+            <span className="text-sm text-gray-500">Showing {showingFrom}-{showingTo} of {totalContacts}</span>
+            <div className="flex items-center gap-2">
+              <button onClick={handlePrevPage} disabled={currentPage === 1} className="px-3 py-1 text-sm border rounded disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50">← Previous</button>
+              <span className="text-sm">Page {currentPage} of {totalPages}</span>
+              <button onClick={handleNextPage} disabled={currentPage === totalPages || totalPages === 0} className="px-3 py-1 text-sm border rounded disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50">Next →</button>
+            </div>
+          </div>
+        )}
+        </>
       )}
     </div>
   )
@@ -1230,6 +1295,8 @@ function HistoryTab({ session }: { session: Session }) {
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
   const [tenantId, setTenantId] = useState<string | null>(null)
+  const [currentPage, setCurrentPage] = useState(1)
+  const SENDS_PER_PAGE = 10
 
   useEffect(() => {
     const fetchData = async () => {
@@ -1278,6 +1345,20 @@ function HistoryTab({ session }: { session: Session }) {
     const matchesTo = !dateTo || emailDate <= new Date(dateTo + 'T23:59:59')
     return matchesEmail && matchesFile && matchesFrom && matchesTo
   })
+
+  const totalSends = filteredSends.length
+  const totalPages = Math.ceil(totalSends / SENDS_PER_PAGE)
+  const showingFrom = totalSends === 0 ? 0 : (currentPage - 1) * SENDS_PER_PAGE + 1
+  const showingTo = Math.min(currentPage * SENDS_PER_PAGE, totalSends)
+  const paginatedSends = filteredSends.slice((currentPage - 1) * SENDS_PER_PAGE, currentPage * SENDS_PER_PAGE)
+
+  const handlePrevPage = () => {
+    if (currentPage > 1) setCurrentPage(currentPage - 1)
+  }
+
+  const handleNextPage = () => {
+    if (currentPage < totalPages) setCurrentPage(currentPage + 1)
+  }
 
   const hasFilters = searchEmail || searchFile || dateFrom || dateTo
 
@@ -1416,8 +1497,9 @@ function HistoryTab({ session }: { session: Session }) {
         </button>
       </div>
       {loading ? <p>Loading...</p> : (
-        <div className="space-y-2">
-          {filteredSends.map(s => {
+        <>
+          <div className="space-y-2">
+            {paginatedSends.map(s => {
             const atts = attachments[s.id] || []
             const evtList = events[s.id] || []
             const isExpanded = expandedId === s.id
@@ -1489,8 +1571,19 @@ function HistoryTab({ session }: { session: Session }) {
               )}
             </div>
           )})}
-          {sends.length === 0 && <p className="text-center text-gray-400 py-4">No emails sent yet</p>}
+          {filteredSends.length === 0 && <p className="text-center text-gray-400 py-4">No emails sent yet</p>}
         </div>
+        {totalPages >= 1 && (
+          <div className="flex justify-between items-center mt-4 pt-3 border-t">
+            <span className="text-sm text-gray-500">Showing {showingFrom}-{showingTo} of {totalSends}</span>
+            <div className="flex items-center gap-2">
+              <button onClick={handlePrevPage} disabled={currentPage === 1} className="px-3 py-1 text-sm border rounded disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50">← Previous</button>
+              <span className="text-sm">Page {currentPage} of {totalPages}</span>
+              <button onClick={handleNextPage} disabled={currentPage === totalPages || totalPages === 0} className="px-3 py-1 text-sm border rounded disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50">Next →</button>
+            </div>
+          </div>
+        )}
+        </>
       )}
     </div>
   )
@@ -1508,9 +1601,12 @@ function FilesTab({ session }: { session: Session }) {
   const [files, setFiles] = useState<StorageFile[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
+  const [exactMatch, setExactMatch] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [tenantId, setTenantId] = useState<string | null>(null)
+  const [currentPage, setCurrentPage] = useState(1)
+  const FILES_PER_PAGE = 12
 
   const BUCKET_NAME = 'dfsdfsdf'
 
@@ -1588,9 +1684,44 @@ function FilesTab({ session }: { session: Session }) {
     return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
   }
 
-  const filteredFiles = files.filter(f => 
-    search === '' || f.name.toLowerCase().includes(search.toLowerCase())
+  const filteredFiles = files.filter(f =>
+    search === '' || (exactMatch ? f.name.toLowerCase() === search.toLowerCase() : f.name.toLowerCase().includes(search.toLowerCase()))
   )
+
+  const totalFiles = filteredFiles.length
+  const totalPages = Math.ceil(totalFiles / FILES_PER_PAGE)
+  const showingFrom = totalFiles === 0 ? 0 : (currentPage - 1) * FILES_PER_PAGE + 1
+  const showingTo = Math.min(currentPage * FILES_PER_PAGE, totalFiles)
+  const paginatedFiles = filteredFiles.slice((currentPage - 1) * FILES_PER_PAGE, currentPage * FILES_PER_PAGE)
+
+  const handlePrevPage = () => {
+    if (currentPage > 1) setCurrentPage(currentPage - 1)
+  }
+
+  const handleNextPage = () => {
+    if (currentPage < totalPages) setCurrentPage(currentPage + 1)
+  }
+
+  const hasFilters = search
+
+  const deleteFilteredFiles = async () => {
+    const filesToDelete = hasFilters ? filteredFiles : files
+    if (filesToDelete.length === 0 || !tenantId) return
+
+    const confirmMsg = hasFilters
+      ? `Delete ${filesToDelete.length} filtered files? This cannot be undone.`
+      : `Delete ALL ${filesToDelete.length} files? This cannot be undone.`
+
+    if (!confirm(confirmMsg)) return
+
+    const pathsToDelete = filesToDelete.map(f => `${session.user.id}/${f.name}`)
+    const { error } = await supabase.storage.from(BUCKET_NAME).remove(pathsToDelete)
+    if (error) {
+      alert(`Delete failed: ${error.message}`)
+      return
+    }
+    fetchFiles()
+  }
 
   return (
     <div className="bg-white p-6 rounded shadow">
@@ -1604,6 +1735,18 @@ function FilesTab({ session }: { session: Session }) {
             onChange={(e) => setSearch(e.target.value)}
             className="border p-2 rounded text-sm w-48"
           />
+          <input
+            id="exactMatchFile"
+            type="checkbox"
+            checked={exactMatch}
+            onChange={(e) => setExactMatch(e.target.checked)}
+          />
+          <label htmlFor="exactMatchFile" className="text-sm">Exact</label>
+          {files.length > 0 && (
+            <button onClick={deleteFilteredFiles} className="bg-red-600 text-white px-3 py-2 rounded text-sm hover:bg-red-700">
+              {hasFilters ? `Delete (${filteredFiles.length})` : `Delete All (${files.length})`}
+            </button>
+          )}
           <input
             type="file"
             onChange={(e) => e.target.files?.[0] && setSelectedFile(e.target.files[0])}
@@ -1622,8 +1765,9 @@ function FilesTab({ session }: { session: Session }) {
       {loading ? (
         <p className="text-center py-4">Loading...</p>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {filteredFiles.map((file) => {
+        <>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {paginatedFiles.map((file) => {
             const fullPath = `${session.user.id}/${file.name}`
             return (
               <div key={file.id} className="border rounded p-4 hover:shadow-md transition-shadow">
@@ -1662,12 +1806,28 @@ function FilesTab({ session }: { session: Session }) {
               </div>
             )
           })}
+          {paginatedFiles.length === 0 && filteredFiles.length > 0 && (
+            <p className="col-span-full text-center text-gray-400 py-8">
+              No files on this page
+            </p>
+          )}
           {filteredFiles.length === 0 && (
             <p className="col-span-full text-center text-gray-400 py-8">
               {search ? 'No files match your search' : 'No files uploaded yet'}
             </p>
           )}
         </div>
+        {totalPages >= 1 && (
+          <div className="flex justify-between items-center mt-4 pt-3 border-t">
+            <span className="text-sm text-gray-500">Showing {showingFrom}-{showingTo} of {totalFiles}</span>
+            <div className="flex items-center gap-2">
+              <button onClick={handlePrevPage} disabled={currentPage === 1} className="px-3 py-1 text-sm border rounded disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50">← Previous</button>
+              <span className="text-sm">Page {currentPage} of {totalPages}</span>
+              <button onClick={handleNextPage} disabled={currentPage === totalPages || totalPages === 0} className="px-3 py-1 text-sm border rounded disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50">Next →</button>
+            </div>
+          </div>
+        )}
+        </>
       )}
     </div>
   )
@@ -1686,8 +1846,11 @@ function ListsTab({ session, onSelectList, onListsChanged }: { session: Session,
   const [newListName, setNewListName] = useState('')
   const [showAddForm, setShowAddForm] = useState(false)
   const [search, setSearch] = useState('')
+  const [exactMatch, setExactMatch] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editName, setEditName] = useState('')
+  const [currentPage, setCurrentPage] = useState(1)
+  const LISTS_PER_PAGE = 10
 
   const fetchLists = async () => {
     setLoading(true)
@@ -1756,9 +1919,42 @@ function ListsTab({ session, onSelectList, onListsChanged }: { session: Session,
     setEditName('')
   }
 
-  const filteredLists = lists.filter(l => 
-    !search || l.name.toLowerCase().includes(search.toLowerCase())
+  const filteredLists = lists.filter(l =>
+    !search || (exactMatch ? l.name.toLowerCase() === search.toLowerCase() : l.name.toLowerCase().includes(search.toLowerCase()))
   )
+
+  const totalLists = filteredLists.length
+  const totalPages = Math.ceil(totalLists / LISTS_PER_PAGE)
+  const showingFrom = totalLists === 0 ? 0 : (currentPage - 1) * LISTS_PER_PAGE + 1
+  const showingTo = Math.min(currentPage * LISTS_PER_PAGE, totalLists)
+  const paginatedLists = filteredLists.slice((currentPage - 1) * LISTS_PER_PAGE, currentPage * LISTS_PER_PAGE)
+
+  const handlePrevPage = () => {
+    if (currentPage > 1) setCurrentPage(currentPage - 1)
+  }
+
+  const handleNextPage = () => {
+    if (currentPage < totalPages) setCurrentPage(currentPage + 1)
+  }
+
+  const hasFilters = search
+
+  const deleteFilteredLists = async () => {
+    const dataToDelete = hasFilters ? filteredLists : lists
+    if (dataToDelete.length === 0) return
+
+    const confirmMsg = hasFilters
+      ? `Delete ${dataToDelete.length} filtered lists? Contacts will be unlinked but not deleted.`
+      : `Delete ALL ${dataToDelete.length} lists? Contacts will be unlinked but not deleted.`
+
+    if (!confirm(confirmMsg)) return
+
+    const listIds = dataToDelete.map(l => l.id)
+    for (const id of listIds) {
+      await supabase.from('lists').delete().eq('id', id)
+    }
+    fetchLists()
+  }
 
   return (
     <div className="bg-white p-6 rounded shadow">
@@ -1772,6 +1968,18 @@ function ListsTab({ session, onSelectList, onListsChanged }: { session: Session,
             onChange={e => setSearch(e.target.value)}
             className="border p-2 rounded text-sm w-40"
           />
+          <input
+            id="exactMatchList"
+            type="checkbox"
+            checked={exactMatch}
+            onChange={e => setExactMatch(e.target.checked)}
+          />
+          <label htmlFor="exactMatchList" className="text-sm">Exact</label>
+          {lists.length > 0 && (
+            <button onClick={deleteFilteredLists} className="bg-red-600 text-white px-3 py-2 rounded text-sm hover:bg-red-700">
+              {hasFilters ? `Delete (${filteredLists.length})` : `Delete All (${lists.length})`}
+            </button>
+          )}
           <button 
             onClick={() => setShowAddForm(!showAddForm)} 
             className="text-blue-600 hover:underline text-sm"
@@ -1798,7 +2006,8 @@ function ListsTab({ session, onSelectList, onListsChanged }: { session: Session,
       {loading ? (
         <p>Loading...</p>
       ) : (
-        <table className="min-w-full text-sm">
+        <>
+          <table className="min-w-full text-sm">
           <thead>
             <tr className="border-b">
               <th className="text-left p-2">List Name</th>
@@ -1808,7 +2017,7 @@ function ListsTab({ session, onSelectList, onListsChanged }: { session: Session,
             </tr>
           </thead>
           <tbody>
-            {filteredLists.map(list => (
+            {paginatedLists.map(list => (
               <tr key={list.id} className="border-b hover:bg-gray-50">
                 <td className="p-2">
                   {editingId === list.id ? (
@@ -1847,11 +2056,25 @@ function ListsTab({ session, onSelectList, onListsChanged }: { session: Session,
                 </td>
               </tr>
             ))}
+            {paginatedLists.length === 0 && filteredLists.length > 0 && (
+              <tr><td colSpan={4} className="p-4 text-center text-gray-400">No lists on this page</td></tr>
+            )}
             {filteredLists.length === 0 && (
               <tr><td colSpan={4} className="p-4 text-center text-gray-400">{search ? 'No lists match your search' : 'No lists yet'}</td></tr>
             )}
           </tbody>
         </table>
+        {totalPages >= 1 && (
+          <div className="flex justify-between items-center mt-4 pt-3 border-t">
+            <span className="text-sm text-gray-500">Showing {showingFrom}-{showingTo} of {totalLists}</span>
+            <div className="flex items-center gap-2">
+              <button onClick={handlePrevPage} disabled={currentPage === 1} className="px-3 py-1 text-sm border rounded disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50">← Previous</button>
+              <span className="text-sm">Page {currentPage} of {totalPages}</span>
+              <button onClick={handleNextPage} disabled={currentPage === totalPages || totalPages === 0} className="px-3 py-1 text-sm border rounded disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50">Next →</button>
+            </div>
+          </div>
+        )}
+        </>
       )}
     </div>
   )
@@ -1876,23 +2099,96 @@ function BatchesTab({ session }: { session: Session }) {
   const [loading, setLoading] = useState(true)
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [recipients, setRecipients] = useState<Record<string, { email: string; status: string; error_detail: string | null }[]>>({})
+  const [currentPage, setCurrentPage] = useState(1)
+  const [totalCount, setTotalCount] = useState(0)
+  const [search, setSearch] = useState('')
+  const [exactMatch, setExactMatch] = useState(false)
+  const [tenantId, setTenantId] = useState<string | null>(null)
+  const BATCHES_PER_PAGE = 10
 
-  const fetchBatches = async () => {
+  const fetchBatches = async (page: number = 1) => {
     setLoading(true)
     const { data: membership } = await supabase.from('memberships').select('tenant_id').eq('user_id', session.user.id).single()
     if (!membership) { setLoading(false); return }
+    setTenantId(membership.tenant_id)
 
-    const { data } = await supabase.from('batches').select('*').eq('tenant_id', membership.tenant_id).order('created_at', { ascending: false }).limit(50)
-    if (data) setBatches(data as BatchRow[])
+    const from = (page - 1) * BATCHES_PER_PAGE
+    const to = from + BATCHES_PER_PAGE - 1
+
+    let batchesQuery = supabase.from('batches').select('*').eq('tenant_id', membership.tenant_id)
+    let countQuery = supabase.from('batches').select('*', { count: 'exact', head: true }).eq('tenant_id', membership.tenant_id)
+
+    if (search) {
+      if (exactMatch) {
+        batchesQuery = batchesQuery.eq('subject', search)
+        countQuery = countQuery.eq('subject', search)
+      } else {
+        batchesQuery = batchesQuery.ilike('subject', `%${search}%`)
+        countQuery = countQuery.ilike('subject', `%${search}%`)
+      }
+    }
+
+    const [batchesResult, countResult] = await Promise.all([
+      batchesQuery.order('created_at', { ascending: false }).range(from, to),
+      countQuery
+    ])
+
+    if (batchesResult.data) setBatches(batchesResult.data as BatchRow[])
+    if (countResult.count !== null) setTotalCount(countResult.count)
+    setCurrentPage(page)
     setLoading(false)
   }
 
-  useEffect(() => { fetchBatches() }, [session.user.id])
+  useEffect(() => { fetchBatches(1) }, [session.user.id])
 
   useEffect(() => {
-    const interval = setInterval(fetchBatches, 10000)
+    const interval = setInterval(() => fetchBatches(currentPage), 10000)
     return () => clearInterval(interval)
-  }, [session.user.id])
+  }, [session.user.id, currentPage])
+
+  const handlePrevPage = () => {
+    if (currentPage > 1) fetchBatches(currentPage - 1)
+  }
+
+  const handleNextPage = () => {
+    if (currentPage * BATCHES_PER_PAGE < totalCount) fetchBatches(currentPage + 1)
+  }
+
+  const hasFilters = search
+
+  const deleteFilteredBatches = async () => {
+    if (!tenantId) return
+
+    let deleteQuery = supabase.from('batches').select('id').eq('tenant_id', tenantId)
+    if (search) {
+      if (exactMatch) {
+        deleteQuery = deleteQuery.eq('subject', search)
+      } else {
+        deleteQuery = deleteQuery.ilike('subject', `%${search}%`)
+      }
+    }
+
+    const { data: batchesToDelete } = await deleteQuery
+    if (!batchesToDelete || batchesToDelete.length === 0) return
+
+    const confirmMsg = hasFilters
+      ? `Delete ${batchesToDelete.length} filtered batches? This cannot be undone.`
+      : `Delete ALL ${batchesToDelete.length} batches? This cannot be undone.`
+
+    if (!confirm(confirmMsg)) return
+
+    const batchIds = batchesToDelete.map(b => b.id)
+    for (const id of batchIds) {
+      await supabase.from('recipient_list').delete().eq('batch_id', id)
+    }
+    const { error } = await supabase.from('batches').delete().in('id', batchIds).eq('tenant_id', tenantId)
+    if (error) {
+      console.error('Failed to delete batches:', error)
+      alert(`Failed to delete batches: ${error.message}`)
+      return
+    }
+    fetchBatches(1)
+  }
 
   const fetchRecipients = async (batchId: string) => {
     if (recipients[batchId]) {
@@ -1917,14 +2213,43 @@ function BatchesTab({ session }: { session: Session }) {
     }
   }
 
+  const totalPages = Math.ceil(totalCount / BATCHES_PER_PAGE)
+  const showingFrom = totalCount === 0 ? 0 : (currentPage - 1) * BATCHES_PER_PAGE + 1
+  const showingTo = Math.min(currentPage * BATCHES_PER_PAGE, totalCount)
+
   return (
     <div className="bg-white p-6 rounded shadow">
       <div className="flex justify-between items-center mb-4">
         <h2 className="text-lg font-bold">Batch Sends</h2>
-        <button onClick={fetchBatches} className="text-sm text-blue-600 hover:underline">Refresh</button>
+        <button onClick={() => fetchBatches(currentPage)} className="text-sm text-blue-600 hover:underline">Refresh</button>
       </div>
-      {loading ? <p>Loading...</p> : batches.length === 0 ? <p className="text-gray-500">No batch sends yet. Use "Send to List" in Compose to create one.</p> : (
-        <div className="space-y-3">
+      <div className="flex gap-2 mb-4 items-center">
+        <input
+          type="text"
+          placeholder="Search by subject..."
+          value={search}
+          onChange={e => { setSearch(e.target.value); setCurrentPage(1); fetchBatches(1) }}
+          className="border p-2 rounded text-sm w-48"
+        />
+        <input
+          id="exactMatchBatch"
+          type="checkbox"
+          checked={exactMatch}
+          onChange={e => { setExactMatch(e.target.checked); setCurrentPage(1); fetchBatches(1) }}
+        />
+        <label htmlFor="exactMatchBatch" className="text-sm">Exact</label>
+        {search && (
+          <button onClick={() => { setSearch(''); setCurrentPage(1); fetchBatches(1) }} className="text-red-600 hover:underline text-sm">Clear</button>
+        )}
+        {totalCount > 0 && (
+          <button onClick={deleteFilteredBatches} className="bg-red-600 text-white px-3 py-2 rounded text-sm hover:bg-red-700">
+            {hasFilters ? `Delete (${totalCount})` : `Delete All (${totalCount})`}
+          </button>
+        )}
+      </div>
+      {loading ? <p>Loading...</p> : batches.length === 0 ? <p className="text-gray-500">{search ? 'No batches match your search' : 'No batch sends yet. Use "Send to List" in Compose to create one.'}</p> : (
+        <>
+          <div className="space-y-3">
           {batches.map(batch => {
             const progress = batch.total_count > 0 ? Math.round(((batch.sent_count || 0) + (batch.failed_count || 0)) / batch.total_count * 100) : 0
             return (
@@ -1972,6 +2297,15 @@ function BatchesTab({ session }: { session: Session }) {
             )
           })}
         </div>
+        <div className="flex justify-between items-center mt-4 pt-3 border-t">
+          <span className="text-sm text-gray-500">Showing {showingFrom}-{showingTo} of {totalCount}</span>
+          <div className="flex items-center gap-2">
+            <button onClick={handlePrevPage} disabled={currentPage === 1} className="px-3 py-1 text-sm border rounded disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50">← Previous</button>
+            <span className="text-sm">Page {currentPage} of {totalPages}</span>
+            <button onClick={handleNextPage} disabled={currentPage === totalPages || totalPages === 0} className="px-3 py-1 text-sm border rounded disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50">Next →</button>
+          </div>
+        </div>
+        </>
       )}
     </div>
   )
