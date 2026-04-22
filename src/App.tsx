@@ -712,7 +712,18 @@ function ComposeTab({ session, attachments, setAttachments }: { session: Session
         <div>
           <label className="block text-sm font-medium mb-1">HTML Content</label>
           <textarea value={htmlContent} onChange={e => setHtmlContent(e.target.value)} rows={8} className="w-full border p-2 rounded font-mono text-sm" required />
-          <p className="text-xs text-gray-500">Supports HTML. Links will be automatically tracked.</p>
+          <div className="flex items-center gap-2 mt-1">
+            <p className="text-xs text-gray-500">Supports HTML. Links will be automatically tracked.</p>
+            <button
+              type="button"
+              onClick={() => setHtmlContent(prev => prev + '{name}')}
+              className="text-xs text-blue-600 hover:underline"
+              title="Insert contact name placeholder"
+            >
+              + Insert {name}
+            </button>
+            <span className="text-xs text-gray-400">| Available: {'{name}'}</span>
+          </div>
         </div>
         <div>
           <div className="flex items-center justify-between mb-2">

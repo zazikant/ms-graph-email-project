@@ -122,13 +122,17 @@ Deno.serve(async (req) => {
       })
     }
 
-    // 5. Hardbounce check
+    // 5. Hardbounce check and get contact name for personalization
+    let contactName = recipient.split('@')[0]
     if (tenantId) {
-      const { data: contact } = await supabase.from('contacts').select('status').eq('tenant_id', tenantId).eq('email', recipient).single()
+      const { data: contact } = await supabase.from('contacts').select('status, name').eq('tenant_id', tenantId).eq('email', recipient).single()
       if (contact?.status === 'hardbounced') {
         return new Response(JSON.stringify({ error: 'Contact is hardbounced, cannot send', code: 'hardbounced' }), {
           status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
         })
+      }
+      if (contact?.name) {
+        contactName = contact.name
       }
     }
 
@@ -144,13 +148,14 @@ Deno.serve(async (req) => {
     // 7. Create email_sends record for tracking
     let trackingId = finalCorrId
     let sendId: string | null = null
+    const personalizedContent = content.replace(/\{name\}/gi, contactName)
     if (tenantId) {
       const { data: sendRow, error: sendInsertError } = await supabase.from('email_sends').insert({
         tenant_id: tenantId,
         tracking_id: trackingId,
         recipient_email: recipient,
         subject,
-        html_content: content,
+        html_content: personalizedContent,
         status: 'processing',
         user_id: userId,
         attachments: attachments || [],
@@ -165,7 +170,7 @@ Deno.serve(async (req) => {
     const trackOpenUrl = baseUrl + '/functions/v1/track-open-v2?tid=' + trackingId
     const trackClickUrl = baseUrl + '/functions/v1/track-click-v2?tid=' + trackingId
     const trackingPixel = '<img src="' + trackOpenUrl + '" width="1" height="1" style="display:none" />'
-    const wrappedContent = content.replace(/href="([^"]+)"/g, 'href="' + trackClickUrl + '&url=$1"') + trackingPixel
+    const wrappedContent = personalizedContent.replace(/href="([^"]+)"/g, 'href="' + trackClickUrl + '&url=$1"') + trackingPixel
     let emailStatus: 'sent' | 'failed' = 'failed'
     let errorDetail: string | null = null
     let actualAttachmentSize = 0

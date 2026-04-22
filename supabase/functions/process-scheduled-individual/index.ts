@@ -96,13 +96,27 @@ Deno.serve(async (req) => {
         let emailStatus: "sent" | "failed" = "failed"
         let errorDetail: string | null = null
 
+        let contactName = email.recipient_email.split('@')[0]
+        if (email.tenant_id) {
+          const { data: contact } = await supabase
+            .from('contacts')
+            .select('name')
+            .eq('tenant_id', email.tenant_id)
+            .eq('email', email.recipient_email)
+            .maybeSingle()
+          if (contact?.name) {
+            contactName = contact.name
+          }
+        }
+        const personalizedContent = (email.html_content as string).replace(/\{name\}/gi, contactName)
+
         try {
           const baseUrl = supabaseUrl
           const trackOpenUrl = baseUrl + "/functions/v1/track-open-v2?tid=" + email.tracking_id
           const trackClickUrl = baseUrl + "/functions/v1/track-click-v2?tid=" + email.tracking_id
           const trackingPixel = `<img src="${trackOpenUrl}" width="1" height="1" style="display:none" />`
           const wrappedContent =
-            (email.html_content as string).replace(/href="([^"]+)"/g, `href="${trackClickUrl}&url=$1"`) +
+            personalizedContent.replace(/href="([^"]+)"/g, `href="${trackClickUrl}&url=$1"`) +
             trackingPixel
 
           let downloadedFiles: { name: string; bytes: Uint8Array; size: number }[] = []

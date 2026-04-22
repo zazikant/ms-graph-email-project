@@ -193,6 +193,20 @@ Deno.serve(async (req) => {
 
           const trackingId = recipient.tracking_id
 
+          let contactName = recipient.email.split('@')[0]
+          if (tenantId) {
+            const { data: contact } = await supabase
+              .from('contacts')
+              .select('name')
+              .eq('tenant_id', tenantId)
+              .eq('email', recipient.email)
+              .maybeSingle()
+            if (contact?.name) {
+              contactName = contact.name
+            }
+          }
+          const personalizedContent = (batch.content as string).replace(/\{name\}/gi, contactName)
+
           let emailSendId: string | null = null
           if (tenantId) {
             const { data: sendRow } = await supabase
@@ -202,7 +216,7 @@ Deno.serve(async (req) => {
                 tracking_id: trackingId,
                 recipient_email: recipient.email,
                 subject: batch.subject,
-                html_content: batch.content,
+                html_content: personalizedContent,
                 status: "processing",
                 user_id: userId,
               })
@@ -216,7 +230,7 @@ Deno.serve(async (req) => {
           const trackClickUrl = baseUrl + "/functions/v1/track-click-v2?tid=" + trackingId
           const trackingPixel = `<img src="${trackOpenUrl}" width="1" height="1" style="display:none" />`
           const wrappedContent =
-            (batch.content as string).replace(/href="([^"]+)"/g, `href="${trackClickUrl}&url=$1"`) +
+            personalizedContent.replace(/href="([^"]+)"/g, `href="${trackClickUrl}&url=$1"`) +
             trackingPixel
 
           let emailStatus: "sent" | "failed" = "failed"
