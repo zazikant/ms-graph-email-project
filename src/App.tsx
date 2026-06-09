@@ -1492,19 +1492,35 @@ function HistoryTab({ session }: { session: Session }) {
     setExpandedId(expandedId === id ? null : id)
   }
 
+  const formatIST = (dateStr: string | null | undefined): string => {
+    if (!dateStr) return ''
+    const d = new Date(dateStr)
+    if (isNaN(d.getTime())) return ''
+    return d.toLocaleString('en-IN', {
+      timeZone: 'Asia/Kolkata',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false
+    }).replace(/\//g, '-')
+  }
+
   const downloadCSV = () => {
     const dataToExport = hasFilters ? filteredSends : sends
-    const headers = ['Date', 'Recipient', 'Subject', 'Status', 'Attachments', 'Opens', 'Clicks', 'First Open', 'First Click', 'All Events']
+    const headers = ['Date (IST)', 'Recipient', 'Subject', 'Status', 'Attachments', 'Opens', 'Clicks', 'First Open (IST)', 'First Click (IST)', 'All Events']
     const rows = dataToExport.map(s => {
       const atts = attachments[s.id] || []
       const evtList = events[s.id] || []
       const openEvents = evtList.filter(e => e.event_type === 'open')
       const clickEvents = evtList.filter(e => e.event_type === 'click')
-      const firstOpen = openEvents.length > 0 ? openEvents[0].created_at : ''
-      const firstClick = clickEvents.length > 0 ? clickEvents[0].created_at : ''
-      const allEvents = evtList.map(e => `${e.event_type}:${e.created_at}${e.clicked_url ? ':' + e.clicked_url : ''}`).join('; ')
+      const firstOpen = openEvents.length > 0 ? formatIST(openEvents[0].created_at) : ''
+      const firstClick = clickEvents.length > 0 ? formatIST(clickEvents[0].created_at) : ''
+      const allEvents = evtList.map(e => `${e.event_type}:${formatIST(e.created_at)}${e.clicked_url ? ':' + e.clicked_url : ''}`).join('; ')
       const row = [
-        s.created_at,
+        formatIST(s.created_at),
         s.recipient_email,
         s.subject,
         s.status,
@@ -1628,10 +1644,10 @@ function HistoryTab({ session }: { session: Session }) {
                 <div className="flex-1 grid grid-cols-7 gap-2 text-sm">
                   <div className="text-gray-500 text-xs">
                     {s.send_at
-                      ? new Date(s.send_at).toLocaleString()
+                      ? formatIST(s.send_at)
                       : s.status === 'scheduled'
-                      ? <span className="text-blue-600">Sch: {new Date(s.send_at || s.created_at).toLocaleString()}</span>
-                      : new Date(s.created_at).toLocaleString()}
+                      ? <span className="text-blue-600">Sch: {formatIST(s.send_at || s.created_at)}</span>
+                      : formatIST(s.created_at)}
                   </div>
                   <div className="truncate">{s.recipient_email}</div>
                   <div className="truncate">{s.subject}</div>
@@ -1680,7 +1696,7 @@ function HistoryTab({ session }: { session: Session }) {
                           <div key={i} className={`flex items-center gap-2 text-xs ${e.event_type === 'open' ? 'text-blue-600' : 'text-purple-600'}`}>
                             <span>{e.event_type === 'open' ? '👁 Opened' : '🔗 Clicked'}</span>
                             {e.clicked_url && <span className="text-blue-600 hover:underline" title={e.clicked_url}>{new URL(e.clicked_url).hostname}</span>}
-                            <span className="text-gray-400">• {new Date(e.created_at).toLocaleString()}</span>
+                            <span className="text-gray-400">• {formatIST(e.created_at)}</span>
                           </div>
                         ))}
                       </div>
