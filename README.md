@@ -6,13 +6,13 @@ Smart Batch Processing - For the method only deploying mails using token that is
 # Azure AD steps
 
 The flow for a new tenant:
-New user signs up → creates a new tenant in the tenants table (empty Azure AD fields)
-They go to Settings tab → follow the same 7-step guide you did:
-  Register an Azure AD app in their company's Azure portal
-  Get their own client_id, client_secret, tenant_id
-  Save it via the Settings page (stored in their tenants row)
-They click "Connect with Microsoft" → OAuth flow uses their Azure AD app credentials
-Token stored in their user_ms_graph_links row → tied to their user_id
+1. New user signs up → creates a new tenant in the tenants table (empty Azure AD fields)
+2. They go to Settings tab → follow the same 7-step guide you did:
+  - Register an Azure AD app in their company's Azure portal
+  - Get their own client_id, client_secret, tenant_id
+  - Save it via the Settings page (stored in their tenants row)
+3. They click "Connect with Microsoft" → OAuth flow uses their Azure AD app credentials
+4. Token stored in their user_ms_graph_links row → tied to their user_id
 
 | What | Where stored | Scope |
 |------|-------------|-------|
