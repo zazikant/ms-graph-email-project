@@ -269,7 +269,7 @@ Deno.serve(async (req) => {
       // Microsoft Graph: GET /me/messages with filter for Undeliverable subject
       const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
       const filterQuery = encodeURIComponent(
-        `subject startsWith 'Undeliverable' and receivedDateTime ge ${oneDayAgo}`
+        `startsWith(subject, 'Undeliverable') and receivedDateTime ge ${oneDayAgo}`
       )
 
       try {
@@ -321,7 +321,7 @@ Deno.serve(async (req) => {
 
         // Also check for messages with "Delivery Status Notification" (DSN) or "failure" in subject
         const dsnFilter = encodeURIComponent(
-          `((subject contains 'Delivery Status Notification') or (subject contains 'failure notice') or (subject contains 'Returned mail')) and receivedDateTime ge ${oneDayAgo}`
+          `(contains(subject, 'Delivery Status Notification') or contains(subject, 'failure notice') or contains(subject, 'Returned mail')) and receivedDateTime ge ${oneDayAgo}`
         )
 
         const dsnResp = await fetch(
