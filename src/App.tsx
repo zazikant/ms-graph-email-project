@@ -1249,6 +1249,7 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
   }
 
   return (
+    <>
     <div className="bg-white p-6 rounded shadow">
       <form onSubmit={handleAddContact} className="flex flex-wrap gap-2 mb-4 p-3 bg-gray-50 rounded">
         <input type="email" placeholder="Email" value={newEmail} onChange={e => setNewEmail(e.target.value)} className="border p-2 rounded flex-1 min-w-48" required />
@@ -1399,7 +1400,7 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
         </div>
       </div>
     )}
-    </div>
+    </>
   )
 }
 
