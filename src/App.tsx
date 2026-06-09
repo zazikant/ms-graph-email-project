@@ -2682,14 +2682,22 @@ function SettingsTab({ session }: { session: Session }) {
 
                 {/* Step 6 */}
                 <div>
-                  <h5 className="font-bold text-gray-800 mb-1">Step 6: Configure in Supabase</h5>
-                  <p className="text-xs text-gray-600">
-                    {userRole === 'admin' ? (
-                      <>Paste the 3 values into the <strong>Azure AD App Configuration</strong> form below and click Save.</>
-                    ) : (
-                      <>Share the 3 values with your <strong>admin</strong> — they can configure them in the <strong>Azure AD App Configuration</strong> section below.</>
-                    )}
-                  </p>
+                  <h5 className="font-bold text-gray-800 mb-1">Step 6: Update Your Supabase Database</h5>
+                  <p className="text-xs text-gray-600 mb-2">Once you have the 3 values, you can either use the form below or run this SQL in the Supabase SQL Editor:</p>
+                  <div className="bg-gray-900 text-green-400 rounded p-2 font-mono text-xs overflow-x-auto">
+                    <pre>{`UPDATE tenants
+SET
+  ms_client_id = 'YOUR_CLIENT_ID',
+  ms_client_secret = 'YOUR_CLIENT_SECRET',
+  ms_tenant_id = 'YOUR_TENANT_ID'
+WHERE id = 'YOUR_TENANT_ID';`}</pre>
+                  </div>
+                  <p className="text-xs text-gray-500 mt-1">Or set them as <strong>Supabase environment variables</strong> (Project Settings → Edge Functions → Function Secrets):</p>
+                  <div className="bg-gray-900 text-green-400 rounded p-2 font-mono text-xs mt-1">
+                    <div>MS_CLIENT_ID=YOUR_CLIENT_ID</div>
+                    <div>MS_CLIENT_SECRET=YOUR_CLIENT_SECRET</div>
+                    <div>MS_TENANT_ID=YOUR_TENANT_ID</div>
+                  </div>
                 </div>
 
                 {/* Step 7 — Supabase edge function config */}
@@ -2705,7 +2713,7 @@ function SettingsTab({ session }: { session: Session }) {
                     <div className="bg-yellow-50 border border-yellow-200 rounded p-2">
                       <p className="text-xs text-yellow-800 font-bold">Set FRONTEND_URL secret</p>
                       <p className="text-xs text-yellow-700 mt-0.5">Project Settings (⚙️ gear icon, bottom left) → Edge Functions → Function Secrets → Add:</p>
-                      <p className="text-xs font-mono mt-0.5">FRONTEND_URL = https://ms-graph-email-project.vercel.app</p>
+                      <p className="text-xs font-mono mt-0.5">FRONTEND_URL = https://your-app.vercel.app</p>
                       <p className="text-xs text-yellow-600 mt-0.5">Why: After Microsoft login, the callback needs to redirect the user back to your app. Without this, users land on a blank Supabase page instead.</p>
                     </div>
                   </div>
@@ -2738,23 +2746,23 @@ function SettingsTab({ session }: { session: Session }) {
                   </div>
                 </div>
 
-                {/* Why this matters */}
+                {/* Why This Fixes the Authenticator Problem */}
                 <div className="bg-blue-50 border border-blue-200 rounded p-3">
-                  <h5 className="font-bold text-blue-800 text-xs mb-1">Why This Matters</h5>
+                  <h5 className="font-bold text-blue-800 text-xs mb-1">Why This Fixes the Authenticator Problem</h5>
                   <div className="overflow-hidden text-xs">
                     <table className="w-full">
                       <thead>
                         <tr>
                           <th className="text-left p-1 font-medium"></th>
-                          <th className="text-left p-1 font-medium text-green-700">With Azure AD</th>
+                          <th className="text-left p-1 font-medium text-green-700">Your Azure AD App</th>
                           <th className="text-left p-1 font-medium text-orange-700">Without Azure AD</th>
                         </tr>
                       </thead>
                       <tbody className="text-gray-600">
                         <tr className="border-t border-blue-200">
                           <td className="p-1 font-medium">Auth prompt</td>
-                          <td className="p-1 text-green-700">Username/password only</td>
-                          <td className="p-1 text-orange-700">Authenticator required</td>
+                          <td className="p-1 text-green-700">Simple username/password + admin consent</td>
+                          <td className="p-1 text-orange-700">Device code / Authenticator required</td>
                         </tr>
                         <tr className="border-t border-blue-200">
                           <td className="p-1 font-medium">Client secret</td>
@@ -2762,7 +2770,7 @@ function SettingsTab({ session }: { session: Session }) {
                           <td className="p-1 text-orange-700">Not supported (public client)</td>
                         </tr>
                         <tr className="border-t border-blue-200">
-                          <td className="p-1 font-medium">Refresh token</td>
+                          <td className="p-1 font-medium">Refresh token lifetime</td>
                           <td className="p-1 text-green-700">90 days with admin consent</td>
                           <td className="p-1 text-orange-700">24 hours max</td>
                         </tr>
@@ -2772,9 +2780,9 @@ function SettingsTab({ session }: { session: Session }) {
                           <td className="p-1 text-orange-700">Unreliable</td>
                         </tr>
                         <tr className="border-t border-blue-200">
-                          <td className="p-1 font-medium">Batch processing</td>
-                          <td className="p-1 text-green-700">Never gets stuck</td>
-                          <td className="p-1 text-orange-700">Stuck when token expires</td>
+                          <td className="p-1 font-medium">Token refresh</td>
+                          <td className="p-1 text-green-700">Works for months</td>
+                          <td className="p-1 text-orange-700">Breaks after 24h</td>
                         </tr>
                       </tbody>
                     </table>
@@ -2905,7 +2913,7 @@ function SettingsTab({ session }: { session: Session }) {
               </div>
               <div>
                 <p className="text-yellow-700 font-bold">3. FRONTEND_URL secret (Supabase Dashboard)</p>
-                <p className="text-yellow-700">Project Settings (⚙️) → Edge Functions → Function Secrets → <code className="bg-white px-1 rounded">FRONTEND_URL = https://ms-graph-email-project.vercel.app</code>. Without this, users land on a blank page after login.</p>
+                <p className="text-yellow-700">Project Settings (⚙️) → Edge Functions → Function Secrets → <code className="bg-white px-1 rounded">FRONTEND_URL = https://your-app.vercel.app</code>. Without this, users land on a blank page after login.</p>
               </div>
             </div>
           </div>
@@ -3039,8 +3047,22 @@ function SettingsTab({ session }: { session: Session }) {
 
                 {/* Step 6 */}
                 <div>
-                  <h5 className="font-bold text-gray-800 mb-1">Step 6: Enter Credentials Below</h5>
-                  <p className="text-xs text-gray-600">Paste the 3 values you copied into the form below and click Save.</p>
+                  <h5 className="font-bold text-gray-800 mb-1">Step 6: Update Your Supabase Database</h5>
+                  <p className="text-xs text-gray-600 mb-2">Once you have the 3 values, you can either use the form below or run this SQL in the Supabase SQL Editor:</p>
+                  <div className="bg-gray-900 text-green-400 rounded p-2 font-mono text-xs overflow-x-auto">
+                    <pre>{`UPDATE tenants
+SET
+  ms_client_id = 'YOUR_CLIENT_ID',
+  ms_client_secret = 'YOUR_CLIENT_SECRET',
+  ms_tenant_id = 'YOUR_TENANT_ID'
+WHERE id = 'YOUR_TENANT_ID';`}</pre>
+                  </div>
+                  <p className="text-xs text-gray-500 mt-1">Or set them as <strong>Supabase environment variables</strong> (Project Settings → Edge Functions → Function Secrets):</p>
+                  <div className="bg-gray-900 text-green-400 rounded p-2 font-mono text-xs mt-1">
+                    <div>MS_CLIENT_ID=YOUR_CLIENT_ID</div>
+                    <div>MS_CLIENT_SECRET=YOUR_CLIENT_SECRET</div>
+                    <div>MS_TENANT_ID=YOUR_TENANT_ID</div>
+                  </div>
                 </div>
 
                 {/* Step 7 — Supabase edge function config */}
@@ -3056,7 +3078,7 @@ function SettingsTab({ session }: { session: Session }) {
                     <div className="bg-yellow-50 border border-yellow-200 rounded p-2">
                       <p className="text-xs text-yellow-800 font-bold">Set FRONTEND_URL secret</p>
                       <p className="text-xs text-yellow-700 mt-0.5">Project Settings (⚙️ gear icon, bottom left) → Edge Functions → Function Secrets → Add:</p>
-                      <p className="text-xs font-mono mt-0.5">FRONTEND_URL = https://ms-graph-email-project.vercel.app</p>
+                      <p className="text-xs font-mono mt-0.5">FRONTEND_URL = https://your-app.vercel.app</p>
                       <p className="text-xs text-yellow-600 mt-0.5">Why: After Microsoft login, the callback needs to redirect the user back to your app. Without this, users land on a blank Supabase page instead.</p>
                     </div>
                   </div>
@@ -3089,23 +3111,23 @@ function SettingsTab({ session }: { session: Session }) {
                   </div>
                 </div>
 
-                {/* Why this matters */}
+                {/* Why This Fixes the Authenticator Problem */}
                 <div className="bg-blue-50 border border-blue-200 rounded p-3">
-                  <h5 className="font-bold text-blue-800 text-xs mb-1">Why This Matters</h5>
+                  <h5 className="font-bold text-blue-800 text-xs mb-1">Why This Fixes the Authenticator Problem</h5>
                   <div className="overflow-hidden text-xs">
                     <table className="w-full">
                       <thead>
                         <tr>
                           <th className="text-left p-1 font-medium"></th>
-                          <th className="text-left p-1 font-medium text-green-700">With Azure AD</th>
+                          <th className="text-left p-1 font-medium text-green-700">Your Azure AD App</th>
                           <th className="text-left p-1 font-medium text-orange-700">Without Azure AD</th>
                         </tr>
                       </thead>
                       <tbody className="text-gray-600">
                         <tr className="border-t border-blue-200">
                           <td className="p-1 font-medium">Auth prompt</td>
-                          <td className="p-1 text-green-700">Username/password only</td>
-                          <td className="p-1 text-orange-700">Authenticator required</td>
+                          <td className="p-1 text-green-700">Simple username/password + admin consent</td>
+                          <td className="p-1 text-orange-700">Device code / Authenticator required</td>
                         </tr>
                         <tr className="border-t border-blue-200">
                           <td className="p-1 font-medium">Client secret</td>
@@ -3113,7 +3135,7 @@ function SettingsTab({ session }: { session: Session }) {
                           <td className="p-1 text-orange-700">Not supported (public client)</td>
                         </tr>
                         <tr className="border-t border-blue-200">
-                          <td className="p-1 font-medium">Refresh token</td>
+                          <td className="p-1 font-medium">Refresh token lifetime</td>
                           <td className="p-1 text-green-700">90 days with admin consent</td>
                           <td className="p-1 text-orange-700">24 hours max</td>
                         </tr>
@@ -3123,9 +3145,9 @@ function SettingsTab({ session }: { session: Session }) {
                           <td className="p-1 text-orange-700">Unreliable</td>
                         </tr>
                         <tr className="border-t border-blue-200">
-                          <td className="p-1 font-medium">Batch processing</td>
-                          <td className="p-1 text-green-700">Never gets stuck</td>
-                          <td className="p-1 text-orange-700">Stuck when token expires</td>
+                          <td className="p-1 font-medium">Token refresh</td>
+                          <td className="p-1 text-green-700">Works for months</td>
+                          <td className="p-1 text-orange-700">Breaks after 24h</td>
                         </tr>
                       </tbody>
                     </table>
