@@ -1,3 +1,8 @@
+[functions.ms-auth]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/ms-auth/index.ts"
+
 [functions.manage-token]
 enabled = true
 verify_jwt = false
@@ -45,3 +50,18 @@ verify_jwt = false
 enabled = true
 verify_jwt = false
 entrypoint = "./functions/detect-bounces/index.ts"
+
+[functions.manage-azure-config]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/manage-azure-config/index.ts"
+
+[functions.confirm-user]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/confirm-user/index.ts"
+
+[functions.process-scheduled-individual]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/process-scheduled-individual/index.ts"

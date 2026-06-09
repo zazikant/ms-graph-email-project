@@ -2586,22 +2586,202 @@ function SettingsTab({ session }: { session: Session }) {
               )}
             </div>
           ) : (
-            <div className="p-4 bg-orange-50 rounded border border-orange-200">
-              <div className="flex items-center gap-2 mb-2">
-                <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-orange-500 text-white text-xs font-bold">!</span>
-                <h4 className="font-medium text-orange-800">Azure AD Not Configured</h4>
+            <div className="border border-orange-200 rounded-lg overflow-hidden">
+              {/* Header */}
+              <div className="bg-orange-500 text-white p-3">
+                <div className="flex items-center gap-2">
+                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" /></svg>
+                  <h4 className="font-bold">Azure AD Setup Required for OAuth Sign-In</h4>
+                </div>
+                <p className="text-xs text-orange-100 mt-1">Follow these steps once to enable one-click Microsoft sign-in for your whole team. Takes ~5 minutes.</p>
               </div>
-              <p className="text-sm text-orange-700 mb-2">
-                Your organization hasn't registered an Azure AD app yet. You can still use the app with manual tokens, but OAuth sign-in requires Azure AD setup.
-              </p>
-              {userRole === 'admin' && (
-                <button
-                  onClick={() => setShowSetupGuide(true)}
-                  className="text-sm text-blue-600 hover:underline font-medium"
-                >
-                  Set up Azure AD for your organization {'>'}
-                </button>
-              )}
+
+              <div className="p-4 space-y-4 text-sm">
+                {/* Step 1 */}
+                <div>
+                  <h5 className="font-bold text-gray-800 mb-1">Step 1: Open Azure Portal</h5>
+                  <ol className="list-decimal list-inside text-gray-600 text-xs space-y-1 ml-2">
+                    <li>Go to <a href="https://portal.azure.com" target="_blank" rel="noreferrer" className="text-blue-600 underline font-medium">portal.azure.com</a> and sign in with your Microsoft work account</li>
+                    <li>Search for <strong>"Azure Active Directory"</strong> and click it</li>
+                    <li>In the left sidebar, click <strong>"App registrations"</strong> then <strong>"New registration"</strong></li>
+                  </ol>
+                </div>
+
+                {/* Step 2 */}
+                <div>
+                  <h5 className="font-bold text-gray-800 mb-1">Step 2: Fill in the Registration</h5>
+                  <div className="bg-white border rounded overflow-hidden text-xs mt-1">
+                    <table className="w-full">
+                      <tbody>
+                        <tr className="border-b">
+                          <td className="p-2 font-medium text-gray-700 bg-gray-50 w-1/3">Name</td>
+                          <td className="p-2 font-mono text-gray-600">GemEng Email Service (or whatever you like)</td>
+                        </tr>
+                        <tr className="border-b">
+                          <td className="p-2 font-medium text-gray-700 bg-gray-50">Supported account types</td>
+                          <td className="p-2 text-gray-600">Single tenant — "Accounts in this organizational directory only"</td>
+                        </tr>
+                        <tr>
+                          <td className="p-2 font-medium text-gray-700 bg-gray-50">Redirect URI</td>
+                          <td className="p-2">
+                            <span className="font-medium">Platform:</span> <span className="bg-yellow-100 text-yellow-800 px-1 rounded font-bold">Web</span> (NOT SPA!)
+                            <br />
+                            <span className="font-mono text-xs break-all bg-gray-100 px-1 py-0.5 rounded select-all">https://dsrsctzumggkrmyuwodw.supabase.co/functions/v1/ms-auth/callback</span>
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                  <p className="text-xs text-gray-500 mt-1">Click <strong>Register</strong>.</p>
+                </div>
+
+                {/* Step 3 */}
+                <div>
+                  <h5 className="font-bold text-gray-800 mb-1">Step 3: Get Your Credentials</h5>
+                  <p className="text-xs text-gray-600">After registration, you'll see the <strong>Overview</strong> page. Copy these two values:</p>
+                  <ol className="list-decimal list-inside text-gray-600 text-xs space-y-1 ml-2 mt-1">
+                    <li><strong>Application (client) ID</strong> — this is your Client ID</li>
+                    <li><strong>Directory (tenant) ID</strong> — this is your Tenant ID</li>
+                  </ol>
+                </div>
+
+                {/* Step 4 */}
+                <div>
+                  <h5 className="font-bold text-gray-800 mb-1">Step 4: Create a Client Secret</h5>
+                  <ol className="list-decimal list-inside text-gray-600 text-xs space-y-1 ml-2">
+                    <li>Go to <strong>Certificates & secrets</strong> in the left sidebar</li>
+                    <li>Click <strong>New client secret</strong></li>
+                    <li>Description: <span className="font-mono">Supabase Edge Functions</span></li>
+                    <li>Expires: <strong>24 months</strong> (maximum)</li>
+                    <li>Click <strong>Add</strong> then <strong className="text-red-600">copy the Value immediately</strong> (it's hidden after you leave the page!)</li>
+                  </ol>
+                </div>
+
+                {/* Step 5 */}
+                <div>
+                  <h5 className="font-bold text-gray-800 mb-1">Step 5: Add API Permissions</h5>
+                  <ol className="list-decimal list-inside text-gray-600 text-xs space-y-1 ml-2">
+                    <li>Go to <strong>API permissions</strong> in the left sidebar</li>
+                    <li>Click <strong>Add a permission</strong> → <strong>Microsoft Graph</strong> → <strong>Delegated permissions</strong></li>
+                    <li>Add these permissions:
+                      <div className="bg-white border rounded p-2 mt-1 ml-3 inline-block">
+                        <div className="font-mono space-y-0.5">
+                          <div>Mail.Send</div>
+                          <div>Mail.ReadWrite</div>
+                          <div>Mail.ReadBasic</div>
+                          <div>User.Read</div>
+                          <div>User.ReadBasic.All</div>
+                          <div>offline_access</div>
+                        </div>
+                      </div>
+                    </li>
+                    <li className="text-orange-700 font-bold mt-1">Click <strong>"Grant admin consent for [your org]"</strong> and click <strong>Yes</strong> — THIS IS CRITICAL!</li>
+                  </ol>
+                  <p className="text-xs text-gray-500 mt-1">Without admin consent, each user gets prompted to consent individually, which may trigger authenticator prompts and limit refresh tokens to 24 hours.</p>
+                </div>
+
+                {/* Step 6 */}
+                <div>
+                  <h5 className="font-bold text-gray-800 mb-1">Step 6: Configure in Supabase</h5>
+                  <p className="text-xs text-gray-600">
+                    {userRole === 'admin' ? (
+                      <>Paste the 3 values into the <strong>Azure AD App Configuration</strong> form below and click Save.</>
+                    ) : (
+                      <>Share the 3 values with your <strong>admin</strong> — they can configure them in the <strong>Azure AD App Configuration</strong> section below.</>
+                    )}
+                  </p>
+                </div>
+
+                {/* Step 7 — Supabase edge function config */}
+                <div>
+                  <h5 className="font-bold text-gray-800 mb-1">Step 7: Supabase Edge Function Settings</h5>
+                  <p className="text-xs text-gray-600 mb-2">After deploying the <code className="bg-gray-100 px-1 rounded">ms-auth</code> edge function, you MUST do these two things in the Supabase Dashboard:</p>
+                  <div className="space-y-2">
+                    <div className="bg-red-50 border border-red-200 rounded p-2">
+                      <p className="text-xs text-red-800 font-bold">Turn OFF "Verify JWT" for ms-auth</p>
+                      <p className="text-xs text-red-700 mt-0.5">Supabase Dashboard → Edge Functions → ms-auth → Settings → <strong>Verify JWT = OFF</strong></p>
+                      <p className="text-xs text-red-600 mt-0.5">Why: Microsoft redirects to your callback URL <strong>without a JWT</strong>. If this is ON, the callback is blocked with "Missing authorization header" and the OAuth flow fails completely.</p>
+                    </div>
+                    <div className="bg-yellow-50 border border-yellow-200 rounded p-2">
+                      <p className="text-xs text-yellow-800 font-bold">Set FRONTEND_URL secret</p>
+                      <p className="text-xs text-yellow-700 mt-0.5">Project Settings (⚙️ gear icon, bottom left) → Edge Functions → Function Secrets → Add:</p>
+                      <p className="text-xs font-mono mt-0.5">FRONTEND_URL = https://ms-graph-email-project.vercel.app</p>
+                      <p className="text-xs text-yellow-600 mt-0.5">Why: After Microsoft login, the callback needs to redirect the user back to your app. Without this, users land on a blank Supabase page instead.</p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Common Mistakes */}
+                <div className="bg-gray-800 text-white rounded p-3">
+                  <h5 className="font-bold text-xs mb-2">Common Mistakes to Avoid</h5>
+                  <div className="space-y-2 text-xs">
+                    <div className="flex gap-2">
+                      <span className="text-red-400 shrink-0">✗</span>
+                      <p>Adding the redirect URI under <strong>"Expose an API" → "Application ID URI"</strong> — this will fail with "Values of IdentifierUris property must use a verified domain". The redirect URI goes under <strong>"Authentication" → "Add a platform" → "Web"</strong> only.</p>
+                    </div>
+                    <div className="flex gap-2">
+                      <span className="text-red-400 shrink-0">✗</span>
+                      <p>Choosing platform type <strong>"SPA"</strong> instead of <strong>"Web"</strong> — SPA uses a different auth flow. Our app uses server-side Authorization Code Flow with PKCE, which requires the <strong>Web</strong> platform.</p>
+                    </div>
+                    <div className="flex gap-2">
+                      <span className="text-red-400 shrink-0">✗</span>
+                      <p>Adding query parameters to the redirect URI (e.g. <code className="bg-gray-700 px-1 rounded">?user_id=...</code>) — Azure AD requires an <strong>exact match</strong>. Use only the exact URL shown above.</p>
+                    </div>
+                    <div className="flex gap-2">
+                      <span className="text-red-400 shrink-0">✗</span>
+                      <p>Forgetting to <strong>"Grant admin consent"</strong> — without it, refresh tokens last only 24 hours and users may need authenticator prompts.</p>
+                    </div>
+                    <div className="flex gap-2">
+                      <span className="text-red-400 shrink-0">✗</span>
+                      <p>Leaving <strong>"Verify JWT" ON</strong> for the ms-auth edge function — Microsoft's callback has no JWT, so the request is blocked.</p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Why this matters */}
+                <div className="bg-blue-50 border border-blue-200 rounded p-3">
+                  <h5 className="font-bold text-blue-800 text-xs mb-1">Why This Matters</h5>
+                  <div className="overflow-hidden text-xs">
+                    <table className="w-full">
+                      <thead>
+                        <tr>
+                          <th className="text-left p-1 font-medium"></th>
+                          <th className="text-left p-1 font-medium text-green-700">With Azure AD</th>
+                          <th className="text-left p-1 font-medium text-orange-700">Without Azure AD</th>
+                        </tr>
+                      </thead>
+                      <tbody className="text-gray-600">
+                        <tr className="border-t border-blue-200">
+                          <td className="p-1 font-medium">Auth prompt</td>
+                          <td className="p-1 text-green-700">Username/password only</td>
+                          <td className="p-1 text-orange-700">Authenticator required</td>
+                        </tr>
+                        <tr className="border-t border-blue-200">
+                          <td className="p-1 font-medium">Client secret</td>
+                          <td className="p-1 text-green-700">Supported (confidential client)</td>
+                          <td className="p-1 text-orange-700">Not supported (public client)</td>
+                        </tr>
+                        <tr className="border-t border-blue-200">
+                          <td className="p-1 font-medium">Refresh token</td>
+                          <td className="p-1 text-green-700">90 days with admin consent</td>
+                          <td className="p-1 text-orange-700">24 hours max</td>
+                        </tr>
+                        <tr className="border-t border-blue-200">
+                          <td className="p-1 font-medium">offline_access</td>
+                          <td className="p-1 text-green-700">Guaranteed with admin consent</td>
+                          <td className="p-1 text-orange-700">Unreliable</td>
+                        </tr>
+                        <tr className="border-t border-blue-200">
+                          <td className="p-1 font-medium">Batch processing</td>
+                          <td className="p-1 text-green-700">Never gets stuck</td>
+                          <td className="p-1 text-orange-700">Stuck when token expires</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                  <p className="text-xs text-blue-700 mt-2">Because you register a <strong>confidential client</strong> (with a client secret) and <strong>grant admin consent</strong>, users in your org won't need an authenticator — they just sign in once with their email/password, and the refresh token keeps things working automatically.</p>
+                </div>
+              </div>
             </div>
           )}
 
@@ -2702,6 +2882,34 @@ function SettingsTab({ session }: { session: Session }) {
             </button>
           </div>
 
+          {/* Quick fix for existing apps — redirect URI help */}
+          <div className="mt-3 p-3 bg-yellow-50 border border-yellow-200 rounded text-xs">
+            <div className="flex items-center gap-1.5 mb-1">
+              <svg className="w-4 h-4 text-yellow-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+              <span className="font-bold text-yellow-800">Already registered your app? Make sure these are configured correctly!</span>
+            </div>
+            <div className="space-y-2 mt-1">
+              <div>
+                <p className="text-yellow-700 font-bold">1. Redirect URI (Azure Portal)</p>
+                <p className="text-yellow-700">Go to <strong>Azure Portal → App registrations → your app → Authentication</strong>. Add a <strong>Web</strong> platform redirect URI:</p>
+                <div className="bg-white border rounded p-2 font-mono text-xs select-all break-all">
+                  https://dsrsctzumggkrmyuwodw.supabase.co/functions/v1/ms-auth/callback
+                </div>
+                <p className="text-red-600 font-bold mt-1">
+                  Do NOT add this under "Expose an API" → "Application ID URI". It goes under "Authentication" → "Add a platform" → "Web" only. Do NOT add query parameters like ?user_id=...
+                </p>
+              </div>
+              <div>
+                <p className="text-yellow-700 font-bold">2. Verify JWT = OFF (Supabase Dashboard)</p>
+                <p className="text-yellow-700">Edge Functions → ms-auth → Settings → <strong>Verify JWT = OFF</strong>. Microsoft's callback has no JWT — if this is ON, OAuth fails.</p>
+              </div>
+              <div>
+                <p className="text-yellow-700 font-bold">3. FRONTEND_URL secret (Supabase Dashboard)</p>
+                <p className="text-yellow-700">Project Settings (⚙️) → Edge Functions → Function Secrets → <code className="bg-white px-1 rounded">FRONTEND_URL = https://ms-graph-email-project.vercel.app</code>. Without this, users land on a blank page after login.</p>
+              </div>
+            </div>
+          </div>
+
           {/* Current config status */}
           {azureConfig && (
             <div className={`p-3 rounded mt-3 mb-4 text-sm font-medium ${
@@ -2764,17 +2972,18 @@ function SettingsTab({ session }: { session: Session }) {
                       <tbody>
                         <tr className="border-b">
                           <td className="p-2 font-medium text-gray-700 bg-gray-50 w-1/3">Name</td>
-                          <td className="p-2 font-mono text-gray-600">Your Company Email Service</td>
+                          <td className="p-2 font-mono text-gray-600">GemEng Email Service (or whatever you like)</td>
                         </tr>
                         <tr className="border-b">
                           <td className="p-2 font-medium text-gray-700 bg-gray-50">Supported account types</td>
-                          <td className="p-2 text-gray-600">Accounts in this organizational directory only</td>
+                          <td className="p-2 text-gray-600">Single tenant — "Accounts in this organizational directory only"</td>
                         </tr>
                         <tr>
                           <td className="p-2 font-medium text-gray-700 bg-gray-50">Redirect URI</td>
                           <td className="p-2">
-                            <span className="font-medium">Platform:</span> Web<br />
-                            <span className="font-mono text-xs break-all">https://dsrsctzumggkrmyuwodw.supabase.co/functions/v1/ms-auth/callback</span>
+                            <span className="font-medium">Platform:</span> <span className="bg-yellow-100 text-yellow-800 px-1 rounded font-bold">Web</span> (NOT SPA!)
+                            <br />
+                            <span className="font-mono text-xs break-all bg-gray-100 px-1 py-0.5 rounded select-all">https://dsrsctzumggkrmyuwodw.supabase.co/functions/v1/ms-auth/callback</span>
                           </td>
                         </tr>
                       </tbody>
@@ -2785,7 +2994,7 @@ function SettingsTab({ session }: { session: Session }) {
 
                 {/* Step 3 */}
                 <div>
-                  <h5 className="font-bold text-gray-800 mb-1">Step 3: Copy Your Credentials</h5>
+                  <h5 className="font-bold text-gray-800 mb-1">Step 3: Get Your Credentials</h5>
                   <p className="text-xs text-gray-600">After registration, you'll see the <strong>Overview</strong> page. Copy these two values:</p>
                   <ol className="list-decimal list-inside text-gray-600 text-xs space-y-1 ml-2 mt-1">
                     <li><strong>Application (client) ID</strong> — this is your Client ID</li>
@@ -2799,7 +3008,7 @@ function SettingsTab({ session }: { session: Session }) {
                   <ol className="list-decimal list-inside text-gray-600 text-xs space-y-1 ml-2">
                     <li>Go to <strong>Certificates & secrets</strong> in the left sidebar</li>
                     <li>Click <strong>New client secret</strong></li>
-                    <li>Description: <span className="font-mono">Email Service</span></li>
+                    <li>Description: <span className="font-mono">Supabase Edge Functions</span></li>
                     <li>Expires: <strong>24 months</strong> (maximum)</li>
                     <li>Click <strong>Add</strong> then <strong className="text-red-600">copy the Value immediately</strong> (it's hidden after you leave the page)</li>
                   </ol>
@@ -2810,7 +3019,7 @@ function SettingsTab({ session }: { session: Session }) {
                   <h5 className="font-bold text-gray-800 mb-1">Step 5: Add API Permissions</h5>
                   <ol className="list-decimal list-inside text-gray-600 text-xs space-y-1 ml-2">
                     <li>Go to <strong>API permissions</strong> in the left sidebar</li>
-                    <li>Click <strong>Add a permission</strong> {'>'} <strong>Microsoft Graph</strong> {'>'} <strong>Delegated permissions</strong></li>
+                    <li>Click <strong>Add a permission</strong> → <strong>Microsoft Graph</strong> → <strong>Delegated permissions</strong></li>
                     <li>Add these permissions:
                       <div className="bg-white border rounded p-2 mt-1 ml-3 inline-block">
                         <div className="font-mono space-y-0.5">
@@ -2823,14 +3032,61 @@ function SettingsTab({ session }: { session: Session }) {
                         </div>
                       </div>
                     </li>
-                    <li className="text-orange-700 font-bold mt-1">Click "Grant admin consent for [your org]" and click Yes — THIS IS CRITICAL</li>
+                    <li className="text-orange-700 font-bold mt-1">Click <strong>"Grant admin consent for [your org]"</strong> and click <strong>Yes</strong> — THIS IS CRITICAL!</li>
                   </ol>
+                  <p className="text-xs text-gray-500 mt-1">Without admin consent, each user gets prompted to consent individually, which may trigger authenticator prompts and limit refresh tokens to 24 hours.</p>
                 </div>
 
                 {/* Step 6 */}
                 <div>
                   <h5 className="font-bold text-gray-800 mb-1">Step 6: Enter Credentials Below</h5>
                   <p className="text-xs text-gray-600">Paste the 3 values you copied into the form below and click Save.</p>
+                </div>
+
+                {/* Step 7 — Supabase edge function config */}
+                <div>
+                  <h5 className="font-bold text-gray-800 mb-1">Step 7: Supabase Edge Function Settings</h5>
+                  <p className="text-xs text-gray-600 mb-2">After deploying the <code className="bg-gray-100 px-1 rounded">ms-auth</code> edge function, you MUST do these two things in the Supabase Dashboard:</p>
+                  <div className="space-y-2">
+                    <div className="bg-red-50 border border-red-200 rounded p-2">
+                      <p className="text-xs text-red-800 font-bold">Turn OFF "Verify JWT" for ms-auth</p>
+                      <p className="text-xs text-red-700 mt-0.5">Supabase Dashboard → Edge Functions → ms-auth → Settings → <strong>Verify JWT = OFF</strong></p>
+                      <p className="text-xs text-red-600 mt-0.5">Why: Microsoft redirects to your callback URL <strong>without a JWT</strong>. If this is ON, the callback is blocked with "Missing authorization header" and the OAuth flow fails completely.</p>
+                    </div>
+                    <div className="bg-yellow-50 border border-yellow-200 rounded p-2">
+                      <p className="text-xs text-yellow-800 font-bold">Set FRONTEND_URL secret</p>
+                      <p className="text-xs text-yellow-700 mt-0.5">Project Settings (⚙️ gear icon, bottom left) → Edge Functions → Function Secrets → Add:</p>
+                      <p className="text-xs font-mono mt-0.5">FRONTEND_URL = https://ms-graph-email-project.vercel.app</p>
+                      <p className="text-xs text-yellow-600 mt-0.5">Why: After Microsoft login, the callback needs to redirect the user back to your app. Without this, users land on a blank Supabase page instead.</p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Common Mistakes */}
+                <div className="bg-gray-800 text-white rounded p-3">
+                  <h5 className="font-bold text-xs mb-2">Common Mistakes to Avoid</h5>
+                  <div className="space-y-2 text-xs">
+                    <div className="flex gap-2">
+                      <span className="text-red-400 shrink-0">✗</span>
+                      <p>Adding the redirect URI under <strong>"Expose an API" → "Application ID URI"</strong> — this will fail with "Values of IdentifierUris property must use a verified domain". The redirect URI goes under <strong>"Authentication" → "Add a platform" → "Web"</strong> only.</p>
+                    </div>
+                    <div className="flex gap-2">
+                      <span className="text-red-400 shrink-0">✗</span>
+                      <p>Choosing platform type <strong>"SPA"</strong> instead of <strong>"Web"</strong> — SPA uses a different auth flow. Our app uses server-side Authorization Code Flow with PKCE, which requires the <strong>Web</strong> platform.</p>
+                    </div>
+                    <div className="flex gap-2">
+                      <span className="text-red-400 shrink-0">✗</span>
+                      <p>Adding query parameters to the redirect URI (e.g. <code className="bg-gray-700 px-1 rounded">?user_id=...</code>) — Azure AD requires an <strong>exact match</strong>. Use only the exact URL shown above.</p>
+                    </div>
+                    <div className="flex gap-2">
+                      <span className="text-red-400 shrink-0">✗</span>
+                      <p>Forgetting to <strong>"Grant admin consent"</strong> — without it, refresh tokens last only 24 hours and users may need authenticator prompts.</p>
+                    </div>
+                    <div className="flex gap-2">
+                      <span className="text-red-400 shrink-0">✗</span>
+                      <p>Leaving <strong>"Verify JWT" ON</strong> for the ms-auth edge function — Microsoft's callback has no JWT, so the request is blocked.</p>
+                    </div>
+                  </div>
                 </div>
 
                 {/* Why this matters */}
@@ -2874,6 +3130,7 @@ function SettingsTab({ session }: { session: Session }) {
                       </tbody>
                     </table>
                   </div>
+                  <p className="text-xs text-blue-700 mt-2">Because you register a <strong>confidential client</strong> (with a client secret) and <strong>grant admin consent</strong>, users in your org won't need an authenticator — they just sign in once with their email/password, and the refresh token keeps things working automatically.</p>
                 </div>
               </div>
             </div>

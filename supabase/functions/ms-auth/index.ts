@@ -150,7 +150,10 @@ Deno.serve(async (req) => {
         }, { onConflict: 'user_id' })
 
       // Build authorization URL
-      const callbackUrl = `${supabaseUrl}/functions/v1/ms-auth/callback?user_id=${userId}`
+      // Note: Do NOT append user_id as a query param here — Azure AD requires
+      // the redirect_uri to exactly match the registered URI. The user ID is
+      // already carried in the `state` parameter, which is the standard OAuth way.
+      const callbackUrl = `${supabaseUrl}/functions/v1/ms-auth/callback`
       const authUrl = new URL(`https://login.microsoftonline.com/${oauthConfig.tenantId}/oauth2/v2.0/authorize`)
       authUrl.searchParams.set('client_id', oauthConfig.clientId)
       authUrl.searchParams.set('response_type', 'code')
@@ -216,7 +219,8 @@ Deno.serve(async (req) => {
       }
 
       // Exchange authorization code for tokens
-      const callbackUrl = `${supabaseUrl}/functions/v1/ms-auth/callback?user_id=${userId}`
+      // Must use the same redirect_uri as in the authorize step (without query params)
+      const callbackUrl = `${supabaseUrl}/functions/v1/ms-auth/callback`
       const tokenBody = new URLSearchParams({
         client_id: oauthConfig.clientId,
         client_secret: oauthConfig.clientSecret,
