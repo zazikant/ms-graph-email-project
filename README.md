@@ -31,6 +31,8 @@ That's the problem! Your Azure AD credentials are **not stored in the `tenants` 
 
 Your tenant ID is `d15bd162-02e7-4854-bfec-5f055a64903a`. You need to fill in your actual Azure AD values. Run this in SQL Editor — replace the placeholder values with your real ones:
 
+ms_client_secret is the value of secret key that is only visible one time . it is not the secret id.
+
 ```sql
 UPDATE tenants 
 SET ms_client_id = 'YOUR_ACTUAL_CLIENT_ID',
