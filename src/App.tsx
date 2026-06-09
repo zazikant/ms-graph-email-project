@@ -1015,6 +1015,78 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
     return fields
   }
 
+  // Parse entire CSV text into rows, handling multi-line quoted fields per RFC 4180
+  const parseCSVText = (text: string): string[][] => {
+    const rows: string[][] = []
+    let currentRow: string[] = []
+    let currentField = ''
+    let inQuotes = false
+    let i = 0
+
+    while (i < text.length) {
+      const ch = text[i]
+
+      if (inQuotes) {
+        if (ch === '"') {
+          // Check for escaped quote ("")
+          if (i + 1 < text.length && text[i + 1] === '"') {
+            currentField += '"'
+            i += 2
+            continue
+          } else {
+            inQuotes = false // end of quoted field
+            i++
+            continue
+          }
+        } else {
+          currentField += ch
+          i++
+          continue
+        }
+      }
+
+      // Not in quotes
+      if (ch === '"') {
+        inQuotes = true
+        i++
+        continue
+      } else if (ch === ',') {
+        currentRow.push(currentField.trim())
+        currentField = ''
+        i++
+        continue
+      } else if (ch === '\r') {
+        // Handle \r\n or lone \r
+        currentRow.push(currentField.trim())
+        currentField = ''
+        rows.push(currentRow)
+        currentRow = []
+        i++
+        if (i < text.length && text[i] === '\n') i++ // skip \n after \r
+        continue
+      } else if (ch === '\n') {
+        currentRow.push(currentField.trim())
+        currentField = ''
+        rows.push(currentRow)
+        currentRow = []
+        i++
+        continue
+      } else {
+        currentField += ch
+        i++
+        continue
+      }
+    }
+
+    // Handle last field/row (file may not end with newline)
+    if (currentField || currentRow.length > 0) {
+      currentRow.push(currentField.trim())
+      rows.push(currentRow)
+    }
+
+    return rows
+  }
+
   const handleBulkUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
@@ -1022,14 +1094,14 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
     setUploading(true)
     try {
       const text = await file.text()
-      const lines = text.split(/\r?\n/).filter(l => l.trim())
-      if (lines.length < 2) {
+      const rows = parseCSVText(text).filter(r => r.some(c => c)) // remove completely blank rows
+      if (rows.length < 2) {
         alert('CSV file is empty or has no data rows')
         setUploading(false)
         return
       }
 
-      const header = parseCSVLine(lines[0]).map(h => h.toLowerCase().replace(/^"|"$/g, ''))
+      const header = rows[0].map(h => h.toLowerCase().trim())
       const emailIdx = header.indexOf('email')
       const nameIdx = header.indexOf('name')
       const statusIdx = header.indexOf('status')
@@ -1050,15 +1122,15 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
       let added = 0
       let updated = 0
 
-      for (let i = 1; i < lines.length; i++) {
-        const cols = parseCSVLine(lines[i])
-        const email = cols[emailIdx]?.toLowerCase().replace(/^"|"$/g, '')
+      for (let i = 1; i < rows.length; i++) {
+        const cols = rows[i]
+        const email = cols[emailIdx]?.toLowerCase().trim()
         if (!email) continue
 
-        const name = nameIdx !== -1 ? (cols[nameIdx]?.replace(/^"|"$/g, '') || null) : null
-        const statusVal = statusIdx !== -1 ? (cols[statusIdx]?.toLowerCase().replace(/^"|"$/g, '') || 'subscribed') : 'subscribed'
+        const name = nameIdx !== -1 ? (cols[nameIdx]?.trim() || null) : null
+        const statusVal = statusIdx !== -1 ? (cols[statusIdx]?.toLowerCase().trim() || 'subscribed') : 'subscribed'
         const validStatus = ['subscribed', 'unsubscribed', 'hardbounced'].includes(statusVal) ? statusVal : 'subscribed'
-        const listName = listIdx !== -1 ? cols[listIdx]?.toLowerCase().replace(/^"|"$/g, '') : null
+        const listName = listIdx !== -1 ? cols[listIdx]?.toLowerCase().trim() : null
         const listId = listName ? listNameToId[listName] || null : null
 
         const { data: existing } = await supabase
@@ -1110,6 +1182,13 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
     URL.revokeObjectURL(url)
   }
 
+  const csvEscape = (val: string): string => {
+    if (val.includes(',') || val.includes('"') || val.includes('\n') || val.includes('\r')) {
+      return '"' + val.replace(/"/g, '""') + '"'
+    }
+    return val
+  }
+
   const downloadContactsCSV = () => {
     const data = filteredContacts
     if (data.length === 0) {
@@ -1119,9 +1198,7 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
     const header = 'email,name,status,list'
     const rows = data.map(c => {
       const listName = c.list_id ? (lists.find(l => l.id === c.list_id)?.name || '') : ''
-      const email = c.email.includes(',') ? `"${c.email}"` : c.email
-      const name = c.name ? (c.name.includes(',') ? `"${c.name}"` : c.name) : ''
-      return `${email},${name},${c.status},${listName}`
+      return `${csvEscape(c.email)},${csvEscape(c.name || '')},${csvEscape(c.status)},${csvEscape(listName)}`
     })
     const csv = [header, ...rows].join('\n')
     const blob = new Blob([csv], { type: 'text/csv' })
