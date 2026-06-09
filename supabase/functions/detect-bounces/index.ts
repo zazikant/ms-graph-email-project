@@ -203,6 +203,26 @@ function isPermanentBounce(bounceCode: string): boolean {
   return false
 }
 
+/**
+ * Filter messages to only include NDR-like messages (client-side filtering)
+ */
+function filterNDRs(messages: any[]): any[] {
+  const ndrKeywords = [
+    "undeliverable",
+    "delivery status notification",
+    "failure notice",
+    "returned mail",
+    "delivery failure",
+    "message rejected",
+    "mail delivery failed",
+    "could not be delivered",
+  ]
+  return messages.filter((msg) => {
+    const subject = (msg.subject || "").toLowerCase()
+    return ndrKeywords.some((kw) => subject.includes(kw))
+  })
+}
+
 Deno.serve(async (req) => {
   const CRON_SECRET = Deno.env.get("CRON_SECRET")
   if (CRON_SECRET) {
@@ -265,16 +285,14 @@ Deno.serve(async (req) => {
         }
       }
 
-      // Read inbox for NDR messages (last 24 hours)
-      // Microsoft Graph: GET /me/messages with filter for Undeliverable subject
+      // Read inbox for recent messages — use a simple filter that Exchange supports
+      // Then filter for NDR-like subjects client-side to avoid "InefficientFilter" errors
       const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
-      const filterQuery = encodeURIComponent(
-        `startsWith(subject, 'Undeliverable') and receivedDateTime ge ${oneDayAgo}`
-      )
+      const simpleFilter = encodeURIComponent(`receivedDateTime ge ${oneDayAgo}`)
 
       try {
         const messagesResp = await fetch(
-          `https://graph.microsoft.com/v1.0/me/messages?$filter=${filterQuery}&$select=subject,body,receivedDateTime,from&$top=50&$orderby=receivedDateTime desc`,
+          `https://graph.microsoft.com/v1.0/me/messages?$filter=${simpleFilter}&$select=subject,body,receivedDateTime,from&$top=100&$orderby=receivedDateTime desc`,
           {
             headers: {
               Authorization: `Bearer ${accessToken}`,
@@ -284,12 +302,11 @@ Deno.serve(async (req) => {
         )
 
         if (messagesResp.status === 401) {
-          // Try refresh and retry
           const refreshed = await tryRefreshToken(supabase, userId, refreshToken)
           if (refreshed) {
             accessToken = refreshed.access_token
             const retryResp = await fetch(
-              `https://graph.microsoft.com/v1.0/me/messages?$filter=${filterQuery}&$select=subject,body,receivedDateTime,from&$top=50&$orderby=receivedDateTime desc`,
+              `https://graph.microsoft.com/v1.0/me/messages?$filter=${simpleFilter}&$select=subject,body,receivedDateTime,from&$top=100&$orderby=receivedDateTime desc`,
               {
                 headers: {
                   Authorization: `Bearer ${accessToken}`,
@@ -303,7 +320,8 @@ Deno.serve(async (req) => {
               continue
             }
             const retryData = await retryResp.json()
-            await processNDRs(supabase, retryData.value || [], userId, userResult)
+            const ndrMessages = filterNDRs(retryData.value || [])
+            await processNDRs(supabase, ndrMessages, userId, userResult)
           } else {
             userResult.errors.push("Token expired, refresh failed")
             results.push(userResult)
@@ -316,27 +334,8 @@ Deno.serve(async (req) => {
           continue
         } else {
           const messagesData = await messagesResp.json()
-          await processNDRs(supabase, messagesData.value || [], userId, userResult)
-        }
-
-        // Also check for messages with "Delivery Status Notification" (DSN) or "failure" in subject
-        const dsnFilter = encodeURIComponent(
-          `(contains(subject, 'Delivery Status Notification') or contains(subject, 'failure notice') or contains(subject, 'Returned mail')) and receivedDateTime ge ${oneDayAgo}`
-        )
-
-        const dsnResp = await fetch(
-          `https://graph.microsoft.com/v1.0/me/messages?$filter=${dsnFilter}&$select=subject,body,receivedDateTime,from&$top=50&$orderby=receivedDateTime desc`,
-          {
-            headers: {
-              Authorization: `Bearer ${accessToken}`,
-              "Content-Type": "application/json",
-            },
-          }
-        )
-
-        if (dsnResp.ok) {
-          const dsnData = await dsnResp.json()
-          await processNDRs(supabase, dsnData.value || [], userId, userResult)
+          const ndrMessages = filterNDRs(messagesData.value || [])
+          await processNDRs(supabase, ndrMessages, userId, userResult)
         }
       } catch (err) {
         userResult.errors.push(`Network error: ${err instanceof Error ? err.message : "Unknown"}`)
