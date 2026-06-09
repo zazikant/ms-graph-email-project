@@ -2346,6 +2346,7 @@ function SettingsTab({ session }: { session: Session }) {
   const [azureSaving, setAzureSaving] = useState(false)
   const [azureStatus, setAzureStatus] = useState('')
   const [userRole, setUserRole] = useState<string | null>(null)
+  const [showSetupGuide, setShowSetupGuide] = useState(false)
 
   const fetchTokenStatus = async () => {
     try {
@@ -2376,7 +2377,6 @@ function SettingsTab({ session }: { session: Session }) {
   }
 
   useEffect(() => {
-    // Get user role
     const fetchRole = async () => {
       const { data } = await supabase
         .from('memberships')
@@ -2388,7 +2388,6 @@ function SettingsTab({ session }: { session: Session }) {
     fetchRole()
     fetchTokenStatus()
     fetchAzureConfig()
-    // Check for OAuth callback results in URL params
     const params = new URLSearchParams(window.location.search)
     if (params.get('auth_success') === 'true') {
       setStatus('Microsoft account connected successfully!')
@@ -2461,7 +2460,6 @@ function SettingsTab({ session }: { session: Session }) {
     if (!accessToken.trim()) return
     setLoading(true)
     setStatus('Saving token...')
-
     try {
       const res = await fetch(MANAGE_TOKEN_URL, {
         method: 'PUT',
@@ -2472,7 +2470,6 @@ function SettingsTab({ session }: { session: Session }) {
         },
         body: JSON.stringify({ access_token: accessToken.trim() })
       })
-
       const data = await res.json()
       if (!res.ok) {
         setStatus(`Error: ${data.error || 'Failed to save token'}`)
@@ -2491,13 +2488,11 @@ function SettingsTab({ session }: { session: Session }) {
     if (!confirm('Remove your Microsoft Graph token? You will need to reconnect to send emails.')) return
     setLoading(true)
     setStatus('Removing token...')
-
     try {
       const res = await fetch(MANAGE_TOKEN_URL, {
         method: 'DELETE',
         headers: { 'Authorization': `Bearer ${session.access_token}`, 'apikey': supabaseAnonKey }
       })
-
       const data = await res.json()
       if (!res.ok) {
         setStatus(`Error: ${data.error || 'Failed to delete token'}`)
@@ -2538,6 +2533,10 @@ function SettingsTab({ session }: { session: Session }) {
     return `Active (sends today: ${tokenStatus.send_count ?? 0})${expiryInfo}${refreshInfo}`
   }
 
+  // Smart detection: what connection method is available?
+  const hasAzureAD = azureConfig?.has_config || azureConfig?.has_env_fallback
+  const oauthAvailable = !!hasAzureAD
+
   return (
     <div className="bg-white p-6 rounded shadow max-w-2xl space-y-6">
       <h2 className="text-lg font-bold">Settings</h2>
@@ -2552,59 +2551,132 @@ function SettingsTab({ session }: { session: Session }) {
           </div>
         )}
 
-        {/* OAuth Connect Button */}
-        <div className="mb-4 p-4 bg-blue-50 rounded border border-blue-200">
-          <h4 className="font-medium mb-2 text-blue-800">Connect Microsoft Account</h4>
-          <p className="text-sm text-blue-700 mb-3">
-            Sign in with Microsoft to enable automatic token refresh. No authenticator required when your organization's Azure AD app is configured below.
-          </p>
-          <button
-            onClick={startOAuthFlow}
-            disabled={oauthLoading}
-            className="bg-blue-600 text-white py-2 px-4 rounded hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2"
-          >
-            {oauthLoading ? (
-              <span>Connecting...</span>
-            ) : (
-              <svg className="w-5 h-5" viewBox="0 0 21 21" fill="none"><path d="M1 1h9v9H1z" fill="#f25022"/><path d="M11 1h9v9h-9z" fill="#7fba00"/><path d="M1 11h9v9H1z" fill="#00a4ef"/><path d="M11 11h9v9h-9z" fill="#ffb900"/></svg>
-            )}
-            {oauthLoading ? 'Connecting...' : 'Connect with Microsoft'}
-          </button>
-          {tokenStatus?.has_refresh_token && (
-            <p className="mt-2 text-xs text-green-700 font-medium">
-              Auto-refresh is active — tokens will be refreshed automatically.
-            </p>
-          )}
-        </div>
-
-        {/* Manual Token Paste */}
-        <details className="mb-2">
-          <summary className="text-sm text-gray-500 cursor-pointer hover:text-gray-700">
-            Advanced: Manual token paste (tokens expire in 60-90 min)
-          </summary>
-          <form onSubmit={saveToken} className="space-y-4 mt-3">
-            <div>
-              <label className="block text-sm font-medium mb-1">Access Token</label>
-              <textarea value={accessToken} onChange={e => setAccessToken(e.target.value)}
-                rows={4} className="w-full border p-2 rounded text-sm font-mono" placeholder="Paste your Microsoft Graph access token here..." />
-              <p className="text-xs text-gray-500 mt-1">
-                Tokens expire in 60-90 minutes. Get a new one from
-                <a href="https://developer.microsoft.com/en-us/graph/graph-explorer" target="blank" className="text-blue-600 underline ml-1">Graph Explorer</a>
+        {/* Smart connection method selector */}
+        <div className="mb-4 space-y-4">
+          {/* Method A: OAuth (when Azure AD is configured) */}
+          {oauthAvailable ? (
+            <div className="p-4 bg-green-50 rounded border border-green-200">
+              <div className="flex items-center gap-2 mb-2">
+                <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-green-600 text-white text-xs font-bold">A</span>
+                <h4 className="font-medium text-green-800">Sign in with Microsoft (Recommended)</h4>
+              </div>
+              <p className="text-sm text-green-700 mb-3">
+                Your organization has an Azure AD app configured. Sign in once and tokens refresh automatically — no authenticator required, tokens last 90 days.
               </p>
-            </div>
-            <div className="flex gap-2">
-              <button type="submit" disabled={loading || !accessToken.trim()} className="flex-1 bg-gray-800 text-white py-2 rounded disabled:opacity-50">
-                {loading ? 'Saving...' : 'Save Token'}
+              <button
+                onClick={startOAuthFlow}
+                disabled={oauthLoading}
+                className="bg-blue-600 text-white py-2 px-4 rounded hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2"
+              >
+                {oauthLoading ? (
+                  <span>Connecting...</span>
+                ) : (
+                  <svg className="w-5 h-5" viewBox="0 0 21 21" fill="none"><path d="M1 1h9v9H1z" fill="#f25022"/><path d="M11 1h9v9h-9z" fill="#7fba00"/><path d="M1 11h9v9H1z" fill="#00a4ef"/><path d="M11 11h9v9h-9z" fill="#ffb900"/></svg>
+                )}
+                {oauthLoading ? 'Connecting...' : 'Connect with Microsoft'}
               </button>
-              {tokenStatus?.has_token && (
-                <button type="button" onClick={deleteToken} disabled={loading}
-                  className="bg-red-600 text-white py-2 px-4 rounded disabled:opacity-50">
-                  Remove
+              {tokenStatus?.has_refresh_token && (
+                <p className="mt-2 text-xs text-green-700 font-medium">
+                  Auto-refresh is active — tokens will be refreshed automatically.
+                </p>
+              )}
+            </div>
+          ) : (
+            <div className="p-4 bg-orange-50 rounded border border-orange-200">
+              <div className="flex items-center gap-2 mb-2">
+                <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-orange-500 text-white text-xs font-bold">!</span>
+                <h4 className="font-medium text-orange-800">Azure AD Not Configured</h4>
+              </div>
+              <p className="text-sm text-orange-700 mb-2">
+                Your organization hasn't registered an Azure AD app yet. You can still use the app with manual tokens, but OAuth sign-in requires Azure AD setup.
+              </p>
+              {userRole === 'admin' && (
+                <button
+                  onClick={() => setShowSetupGuide(true)}
+                  className="text-sm text-blue-600 hover:underline font-medium"
+                >
+                  Set up Azure AD for your organization {'>'}
                 </button>
               )}
             </div>
-          </form>
-        </details>
+          )}
+
+          {/* Method B: Manual token paste (always available) */}
+          <details className={!oauthAvailable ? '' : ''}>
+            <summary className={`text-sm cursor-pointer hover:text-gray-700 font-medium ${!oauthAvailable ? 'text-blue-600' : 'text-gray-500'}`}>
+              {!oauthAvailable ? 'Option A: Manual Token (Quick Start — no Azure AD needed)' : 'Option B: Manual Token Paste (Fallback)'}
+            </summary>
+            <div className="mt-3 p-3 bg-gray-50 rounded border border-gray-200">
+              <p className="text-xs text-gray-600 mb-2">
+                {!oauthAvailable
+                  ? 'No Azure AD? No problem. Get a token from Microsoft Graph Explorer and paste it here. Tokens expire in 60-90 minutes, so you\'ll need to refresh manually.'
+                  : 'If OAuth sign-in isn\'t working, you can paste a token manually. Tokens expire in 60-90 minutes.'}
+              </p>
+              <form onSubmit={saveToken} className="space-y-3">
+                <div>
+                  <label className="block text-sm font-medium mb-1">Access Token</label>
+                  <textarea value={accessToken} onChange={e => setAccessToken(e.target.value)}
+                    rows={4} className="w-full border p-2 rounded text-sm font-mono" placeholder="Paste your Microsoft Graph access token here..." />
+                  <p className="text-xs text-gray-500 mt-1">
+                    Get a token from{' '}
+                    <a href="https://developer.microsoft.com/en-us/graph/graph-explorer" target="_blank" rel="noreferrer" className="text-blue-600 underline">Microsoft Graph Explorer</a>
+                  </p>
+                </div>
+                <div className="flex gap-2">
+                  <button type="submit" disabled={loading || !accessToken.trim()} className="flex-1 bg-gray-800 text-white py-2 rounded disabled:opacity-50 text-sm">
+                    {loading ? 'Saving...' : 'Save Token'}
+                  </button>
+                  {tokenStatus?.has_token && (
+                    <button type="button" onClick={deleteToken} disabled={loading}
+                      className="bg-red-600 text-white py-2 px-4 rounded disabled:opacity-50 text-sm">
+                      Remove
+                    </button>
+                  )}
+                </div>
+              </form>
+            </div>
+          </details>
+
+          {/* Comparison table */}
+          <div className="bg-gray-50 rounded border border-gray-200 overflow-hidden">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="bg-gray-100">
+                  <th className="text-left p-2 font-medium text-gray-700"></th>
+                  <th className="text-left p-2 font-medium text-green-700">With Azure AD</th>
+                  <th className="text-left p-2 font-medium text-orange-700">Without Azure AD</th>
+                </tr>
+              </thead>
+              <tbody className="text-gray-600">
+                <tr className="border-t border-gray-200">
+                  <td className="p-2 font-medium">Sign-in</td>
+                  <td className="p-2">One-click OAuth</td>
+                  <td className="p-2">Copy/paste token manually</td>
+                </tr>
+                <tr className="border-t border-gray-200">
+                  <td className="p-2 font-medium">Authenticator</td>
+                  <td className="p-2 text-green-700">Not required</td>
+                  <td className="p-2 text-orange-700">May be required</td>
+                </tr>
+                <tr className="border-t border-gray-200">
+                  <td className="p-2 font-medium">Token lifetime</td>
+                  <td className="p-2">90 days (auto-refresh)</td>
+                  <td className="p-2">60-90 minutes (manual)</td>
+                </tr>
+                <tr className="border-t border-gray-200">
+                  <td className="p-2 font-medium">Batch emails</td>
+                  <td className="p-2 text-green-700">Never get stuck</td>
+                  <td className="p-2 text-orange-700">Stuck when token expires mid-batch</td>
+                </tr>
+                <tr className="border-t border-gray-200">
+                  <td className="p-2 font-medium">Cost</td>
+                  <td className="p-2">Free (Azure AD is included)</td>
+                  <td className="p-2">Free (but manual work)</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
 
         {status && (
           <div className={`mt-3 p-2 rounded text-sm ${status.startsWith('Error') ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-800'}`}>
@@ -2616,15 +2688,19 @@ function SettingsTab({ session }: { session: Session }) {
       {/* ===== Section 2: Azure AD App Configuration (Admin Only) ===== */}
       {userRole === 'admin' && (
         <div>
-          <h3 className="text-md font-semibold mb-3 text-gray-800 border-b pb-1">Azure AD App Configuration</h3>
-          <p className="text-sm text-gray-600 mb-3">
-            Configure your organization's Azure AD app so users can connect without an authenticator.
-            Each organization needs its own app registration in their Azure portal.
-          </p>
+          <div className="flex items-center justify-between border-b pb-1">
+            <h3 className="text-md font-semibold text-gray-800">Azure AD App Configuration</h3>
+            <button
+              onClick={() => setShowSetupGuide(!showSetupGuide)}
+              className="text-xs text-blue-600 hover:underline"
+            >
+              {showSetupGuide ? 'Hide setup guide' : 'Show setup guide'}
+            </button>
+          </div>
 
           {/* Current config status */}
           {azureConfig && (
-            <div className={`p-3 rounded mb-4 text-sm font-medium ${
+            <div className={`p-3 rounded mt-3 mb-4 text-sm font-medium ${
               azureConfig.has_config
                 ? 'text-green-700 bg-green-50 border border-green-200'
                 : azureConfig.has_env_fallback
@@ -2633,7 +2709,7 @@ function SettingsTab({ session }: { session: Session }) {
             }`}>
               {azureConfig.has_config ? (
                 <>
-                  Configured (tenant-specific)
+                  Your organization's Azure AD app is configured
                   <span className="block text-xs font-normal mt-1">
                     Client ID: {azureConfig.ms_client_id} | Tenant: {azureConfig.ms_tenant_id}
                     {azureConfig.ms_client_secret_masked && ` | Secret: ${azureConfig.ms_client_secret_masked}`}
@@ -2643,12 +2719,159 @@ function SettingsTab({ session }: { session: Session }) {
                 <>
                   Using platform-level Azure AD app (env vars)
                   <span className="block text-xs font-normal mt-1">
-                    This works for one domain. For multi-domain support, configure tenant-specific credentials below.
+                    This works for one domain. Configure tenant-specific credentials below for multi-domain support.
                   </span>
                 </>
               ) : (
-                'No Azure AD app configured — OAuth login will not work until configured'
+                <>
+                  No Azure AD app configured
+                  <span className="block text-xs font-normal mt-1">
+                    OAuth sign-in won't work until you register an Azure AD app. Follow the setup guide below.
+                  </span>
+                </>
               )}
+            </div>
+          )}
+
+          {/* Full step-by-step setup guide */}
+          {showSetupGuide && (
+            <div className="mb-4 border border-blue-200 rounded-lg overflow-hidden">
+              <div className="bg-blue-600 text-white p-3">
+                <h4 className="font-bold text-sm">Step-by-Step: Register Your Azure AD App (Free)</h4>
+                <p className="text-xs text-blue-100 mt-1">This takes about 5 minutes and eliminates the need for authenticator apps and manual token pasting.</p>
+              </div>
+
+              <div className="p-4 space-y-4 text-sm">
+                {/* Step 1 */}
+                <div>
+                  <h5 className="font-bold text-gray-800 mb-1">Step 1: Open Azure Portal</h5>
+                  <ol className="list-decimal list-inside text-gray-600 text-xs space-y-1 ml-2">
+                    <li>Go to <a href="https://portal.azure.com" target="_blank" rel="noreferrer" className="text-blue-600 underline">portal.azure.com</a> and sign in with your Microsoft work account</li>
+                    <li>Search for <strong>"Azure Active Directory"</strong> and click it</li>
+                    <li>In the left sidebar, click <strong>"App registrations"</strong> then <strong>"New registration"</strong></li>
+                  </ol>
+                </div>
+
+                {/* Step 2 */}
+                <div>
+                  <h5 className="font-bold text-gray-800 mb-1">Step 2: Fill in the Registration</h5>
+                  <div className="bg-white border rounded overflow-hidden text-xs">
+                    <table className="w-full">
+                      <tbody>
+                        <tr className="border-b">
+                          <td className="p-2 font-medium text-gray-700 bg-gray-50 w-1/3">Name</td>
+                          <td className="p-2 font-mono text-gray-600">Your Company Email Service</td>
+                        </tr>
+                        <tr className="border-b">
+                          <td className="p-2 font-medium text-gray-700 bg-gray-50">Supported account types</td>
+                          <td className="p-2 text-gray-600">Accounts in this organizational directory only</td>
+                        </tr>
+                        <tr>
+                          <td className="p-2 font-medium text-gray-700 bg-gray-50">Redirect URI</td>
+                          <td className="p-2">
+                            <span className="font-medium">Platform:</span> Web<br />
+                            <span className="font-mono text-xs break-all">https://dsrsctzumggkrmyuwodw.supabase.co/functions/v1/ms-auth/callback</span>
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                  <p className="text-xs text-gray-500 mt-1">Click <strong>Register</strong>.</p>
+                </div>
+
+                {/* Step 3 */}
+                <div>
+                  <h5 className="font-bold text-gray-800 mb-1">Step 3: Copy Your Credentials</h5>
+                  <p className="text-xs text-gray-600">After registration, you'll see the <strong>Overview</strong> page. Copy these two values:</p>
+                  <ol className="list-decimal list-inside text-gray-600 text-xs space-y-1 ml-2 mt-1">
+                    <li><strong>Application (client) ID</strong> — this is your Client ID</li>
+                    <li><strong>Directory (tenant) ID</strong> — this is your Tenant ID</li>
+                  </ol>
+                </div>
+
+                {/* Step 4 */}
+                <div>
+                  <h5 className="font-bold text-gray-800 mb-1">Step 4: Create a Client Secret</h5>
+                  <ol className="list-decimal list-inside text-gray-600 text-xs space-y-1 ml-2">
+                    <li>Go to <strong>Certificates & secrets</strong> in the left sidebar</li>
+                    <li>Click <strong>New client secret</strong></li>
+                    <li>Description: <span className="font-mono">Email Service</span></li>
+                    <li>Expires: <strong>24 months</strong> (maximum)</li>
+                    <li>Click <strong>Add</strong> then <strong className="text-red-600">copy the Value immediately</strong> (it's hidden after you leave the page)</li>
+                  </ol>
+                </div>
+
+                {/* Step 5 */}
+                <div>
+                  <h5 className="font-bold text-gray-800 mb-1">Step 5: Add API Permissions</h5>
+                  <ol className="list-decimal list-inside text-gray-600 text-xs space-y-1 ml-2">
+                    <li>Go to <strong>API permissions</strong> in the left sidebar</li>
+                    <li>Click <strong>Add a permission</strong> {'>'} <strong>Microsoft Graph</strong> {'>'} <strong>Delegated permissions</strong></li>
+                    <li>Add these permissions:
+                      <div className="bg-white border rounded p-2 mt-1 ml-3 inline-block">
+                        <div className="font-mono space-y-0.5">
+                          <div>Mail.Send</div>
+                          <div>Mail.ReadWrite</div>
+                          <div>Mail.ReadBasic</div>
+                          <div>User.Read</div>
+                          <div>User.ReadBasic.All</div>
+                          <div>offline_access</div>
+                        </div>
+                      </div>
+                    </li>
+                    <li className="text-orange-700 font-bold mt-1">Click "Grant admin consent for [your org]" and click Yes — THIS IS CRITICAL</li>
+                  </ol>
+                </div>
+
+                {/* Step 6 */}
+                <div>
+                  <h5 className="font-bold text-gray-800 mb-1">Step 6: Enter Credentials Below</h5>
+                  <p className="text-xs text-gray-600">Paste the 3 values you copied into the form below and click Save.</p>
+                </div>
+
+                {/* Why this matters */}
+                <div className="bg-blue-50 border border-blue-200 rounded p-3">
+                  <h5 className="font-bold text-blue-800 text-xs mb-1">Why This Matters</h5>
+                  <div className="overflow-hidden text-xs">
+                    <table className="w-full">
+                      <thead>
+                        <tr>
+                          <th className="text-left p-1 font-medium"></th>
+                          <th className="text-left p-1 font-medium text-green-700">With Azure AD</th>
+                          <th className="text-left p-1 font-medium text-orange-700">Without Azure AD</th>
+                        </tr>
+                      </thead>
+                      <tbody className="text-gray-600">
+                        <tr className="border-t border-blue-200">
+                          <td className="p-1 font-medium">Auth prompt</td>
+                          <td className="p-1 text-green-700">Username/password only</td>
+                          <td className="p-1 text-orange-700">Authenticator required</td>
+                        </tr>
+                        <tr className="border-t border-blue-200">
+                          <td className="p-1 font-medium">Client secret</td>
+                          <td className="p-1 text-green-700">Supported (confidential client)</td>
+                          <td className="p-1 text-orange-700">Not supported (public client)</td>
+                        </tr>
+                        <tr className="border-t border-blue-200">
+                          <td className="p-1 font-medium">Refresh token</td>
+                          <td className="p-1 text-green-700">90 days with admin consent</td>
+                          <td className="p-1 text-orange-700">24 hours max</td>
+                        </tr>
+                        <tr className="border-t border-blue-200">
+                          <td className="p-1 font-medium">offline_access</td>
+                          <td className="p-1 text-green-700">Guaranteed with admin consent</td>
+                          <td className="p-1 text-orange-700">Unreliable</td>
+                        </tr>
+                        <tr className="border-t border-blue-200">
+                          <td className="p-1 font-medium">Batch processing</td>
+                          <td className="p-1 text-green-700">Never gets stuck</td>
+                          <td className="p-1 text-orange-700">Stuck when token expires</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
             </div>
           )}
 
@@ -2664,7 +2887,6 @@ function SettingsTab({ session }: { session: Session }) {
                 placeholder="e.g. 3541a59f-8159-4b09-ad63-a60bcab03ec9"
                 required
               />
-              <p className="text-xs text-gray-500 mt-1">From Azure Portal {'>'} App registrations {'>'} Your app {'>'} Overview</p>
             </div>
             <div>
               <label className="block text-sm font-medium mb-1">Client Secret</label>
@@ -2676,9 +2898,6 @@ function SettingsTab({ session }: { session: Session }) {
                 placeholder={azureConfig?.ms_client_secret_set ? 'Enter new secret to replace existing one' : 'Enter client secret value'}
                 required={!azureConfig?.ms_client_secret_set}
               />
-              <p className="text-xs text-gray-500 mt-1">
-                From Azure Portal {'>'} App registrations {'>'} Certificates & secrets {'>'} New client secret
-              </p>
             </div>
             <div>
               <label className="block text-sm font-medium mb-1">Directory (Tenant) ID</label>
@@ -2690,34 +2909,6 @@ function SettingsTab({ session }: { session: Session }) {
                 placeholder="e.g. 3780d0ca-6921-4bcd-83a9-b8a47bf74088"
                 required
               />
-              <p className="text-xs text-gray-500 mt-1">From Azure Portal {'>'} App registrations {'>'} Your app {'>'} Overview</p>
-            </div>
-
-            {/* Redirect URI info */}
-            <div className="bg-gray-50 rounded p-3 border border-gray-200">
-              <p className="text-sm font-medium text-gray-700 mb-1">Required Redirect URI</p>
-              <p className="text-xs text-gray-600 font-mono bg-white p-2 rounded border break-all">
-                https://dsrsctzumggkrmyuwodw.supabase.co/functions/v1/ms-auth/callback
-              </p>
-              <p className="text-xs text-gray-500 mt-1">
-                Add this in Azure Portal {'>'} App registrations {'>'} Authentication {'>'} Add a platform {'>'} Web
-              </p>
-            </div>
-
-            {/* Required permissions info */}
-            <div className="bg-gray-50 rounded p-3 border border-gray-200">
-              <p className="text-sm font-medium text-gray-700 mb-1">Required API Permissions (Delegated)</p>
-              <ul className="text-xs text-gray-600 list-disc list-inside space-y-0.5">
-                <li>Mail.Send</li>
-                <li>Mail.ReadWrite</li>
-                <li>Mail.ReadBasic</li>
-                <li>User.Read</li>
-                <li>User.ReadBasic.All</li>
-                <li>offline_access</li>
-              </ul>
-              <p className="text-xs text-orange-600 font-medium mt-1">
-                Important: Click "Grant admin consent" after adding permissions.
-              </p>
             </div>
 
             <button
