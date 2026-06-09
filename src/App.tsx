@@ -1229,10 +1229,6 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
     fetchData()
   }
 
-  const getDeleteCount = () => {
-    return hasFilters ? filteredContacts.length : contacts.length
-  }
-
   const getListName = (listId: string | null) => {
     if (!listId) return '-'
     const list = lists.find(l => l.id === listId)
