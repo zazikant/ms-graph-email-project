@@ -724,7 +724,8 @@ Deno.serve(async (req) => {
             })
           }
 
-          await new Promise((r) => setTimeout(r, 200))
+          // 10 messages/minute = 6 seconds per message to avoid Exchange Online outbound spam blocks (AS(42004))
+          await new Promise((r) => setTimeout(r, 6000))
         }
 
         // FIX #5: If batch incomplete (timeout, token expired, rate limited), 
