@@ -1543,6 +1543,33 @@ function HistoryTab({ session }: { session: Session }) {
     URL.revokeObjectURL(url)
   }
 
+  const deleteSingleRecord = async (id: string) => {
+    if (!tenantId) return
+    if (!confirm('Delete this record? This cannot be undone.')) return
+
+    const { error: evtErr } = await supabase.from('email_events').delete().eq('send_id', id)
+    if (evtErr) { alert(`Failed: ${evtErr.message}`); return }
+
+    const { error: attErr } = await supabase.from('send_attachments').delete().eq('send_id', id)
+    if (attErr) { alert(`Failed: ${attErr.message}`); return }
+
+    const { error: sendErr } = await supabase.from('email_sends').delete().eq('id', id).eq('tenant_id', tenantId)
+    if (sendErr) { alert(`Failed: ${sendErr.message}`); return }
+
+    setSends(sends.filter(s => s.id !== id))
+    const newAttachments: Record<string, Attachment[]> = {}
+    Object.keys(attachments).forEach(key => {
+      if (key !== id) newAttachments[key] = attachments[key]
+    })
+    setAttachments(newAttachments)
+    const newEvents: Record<string, EmailEvent[]> = {}
+    Object.keys(events).forEach(key => {
+      if (key !== id) newEvents[key] = events[key]
+    })
+    setEvents(newEvents)
+    if (expandedId === id) setExpandedId(null)
+  }
+
   const deleteRecords = async () => {
     const dataToDelete = hasFilters ? filteredSends : sends
     if (dataToDelete.length === 0 || !tenantId) return
@@ -1676,17 +1703,25 @@ function HistoryTab({ session }: { session: Session }) {
               </div>
               {isExpanded && (
                 <div className="p-3 bg-gray-50 border-t text-sm">
-                  <div className="mb-2">
-                    <span className="font-medium">📎 Attachments:</span>
-                    {atts.length > 0 ? (
-                      <div className="flex flex-wrap gap-2 mt-1">
-                        {atts.map(a => (
-                          <span key={a.id} className="text-xs bg-white px-2 py-1 rounded border text-gray-600">
-                            {a.file_name}
-                          </span>
-                        ))}
-                      </div>
-                    ) : <span className="text-gray-400 ml-2">None</span>}
+                  <div className="flex justify-between items-start mb-2">
+                    <div>
+                      <span className="font-medium">📎 Attachments:</span>
+                      {atts.length > 0 ? (
+                        <div className="flex flex-wrap gap-2 mt-1">
+                          {atts.map(a => (
+                            <span key={a.id} className="text-xs bg-white px-2 py-1 rounded border text-gray-600">
+                              {a.file_name}
+                            </span>
+                          ))}
+                        </div>
+                      ) : <span className="text-gray-400 ml-2">None</span>}
+                    </div>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); deleteSingleRecord(s.id) }}
+                      className="text-red-600 hover:text-red-800 text-xs px-2 py-1 border border-red-300 rounded hover:bg-red-50 ml-4 shrink-0"
+                    >
+                      Delete Record
+                    </button>
                   </div>
                   <div>
                     <span className="font-medium">📊 Activity Timeline:</span>
