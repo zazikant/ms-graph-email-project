@@ -36,3 +36,4 @@ dist-ssr
 
 # Secrets folder (don't upload this folder)
 secrets-for-vercel/
+supabase/.temp/

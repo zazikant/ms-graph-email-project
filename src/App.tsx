@@ -4,6 +4,7 @@ import type { Session } from '@supabase/supabase-js'
 
 const MANAGE_TOKEN_URL = `${supabaseUrl}/functions/v1/manage-token`
 const MS_AUTH_URL = `${supabaseUrl}/functions/v1/ms-auth`
+const AZURE_CONFIG_URL = `${supabaseUrl}/functions/v1/manage-azure-config`
 const SEND_INDIVIDUAL_URL = `${supabaseUrl}/functions/v1/send-individual`
 const SCHEDULE_BATCH_URL = `${supabaseUrl}/functions/v1/schedule-batch`
 const CONFIRM_USER_URL = `${supabaseUrl}/functions/v1/confirm-user`
@@ -2330,6 +2331,22 @@ function SettingsTab({ session }: { session: Session }) {
   const [loading, setLoading] = useState(false)
   const [oauthLoading, setOauthLoading] = useState(false)
 
+  // Azure AD config state (admin only)
+  const [azureConfig, setAzureConfig] = useState<{
+    ms_client_id: string | null,
+    ms_client_secret_set: boolean,
+    ms_client_secret_masked: string | null,
+    ms_tenant_id: string | null,
+    has_config: boolean,
+    config_source: string,
+    is_admin: boolean,
+    has_env_fallback: boolean
+  } | null>(null)
+  const [azureForm, setAzureForm] = useState({ ms_client_id: '', ms_client_secret: '', ms_tenant_id: '' })
+  const [azureSaving, setAzureSaving] = useState(false)
+  const [azureStatus, setAzureStatus] = useState('')
+  const [userRole, setUserRole] = useState<string | null>(null)
+
   const fetchTokenStatus = async () => {
     try {
       const res = await fetch(MANAGE_TOKEN_URL, {
@@ -2343,13 +2360,38 @@ function SettingsTab({ session }: { session: Session }) {
     } catch {}
   }
 
+  const fetchAzureConfig = async () => {
+    try {
+      const res = await fetch(AZURE_CONFIG_URL, {
+        method: 'GET',
+        headers: { 'Authorization': `Bearer ${session.access_token}`, 'apikey': supabaseAnonKey }
+      })
+      if (res.ok) {
+        const data = await res.json()
+        setAzureConfig(data)
+        if (data.ms_client_id) setAzureForm(prev => ({ ...prev, ms_client_id: data.ms_client_id }))
+        if (data.ms_tenant_id) setAzureForm(prev => ({ ...prev, ms_tenant_id: data.ms_tenant_id }))
+      }
+    } catch {}
+  }
+
   useEffect(() => {
+    // Get user role
+    const fetchRole = async () => {
+      const { data } = await supabase
+        .from('memberships')
+        .select('role')
+        .eq('user_id', session.user.id)
+        .single()
+      if (data) setUserRole(data.role)
+    }
+    fetchRole()
     fetchTokenStatus()
+    fetchAzureConfig()
     // Check for OAuth callback results in URL params
     const params = new URLSearchParams(window.location.search)
     if (params.get('auth_success') === 'true') {
       setStatus('Microsoft account connected successfully!')
-      // Clean up URL
       window.history.replaceState({}, '', window.location.pathname)
       fetchTokenStatus()
     }
@@ -2374,13 +2416,44 @@ function SettingsTab({ session }: { session: Session }) {
         return
       }
       if (data.authorization_url) {
-        // Open OAuth URL in a new window/tab
         window.location.href = data.authorization_url
       }
     } catch (err) {
       setStatus(`Error: ${err instanceof Error ? err.message : 'Unknown error'}`)
     }
     setOauthLoading(false)
+  }
+
+  const saveAzureConfig = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setAzureSaving(true)
+    setAzureStatus('Saving...')
+    try {
+      const res = await fetch(AZURE_CONFIG_URL, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${session.access_token}`,
+          'apikey': supabaseAnonKey
+        },
+        body: JSON.stringify({
+          ms_client_id: azureForm.ms_client_id.trim(),
+          ms_client_secret: azureForm.ms_client_secret.trim(),
+          ms_tenant_id: azureForm.ms_tenant_id.trim(),
+        })
+      })
+      const data = await res.json()
+      if (!res.ok) {
+        setAzureStatus(`Error: ${data.error || 'Failed to save'}`)
+      } else {
+        setAzureStatus(data.message || 'Azure AD configuration saved!')
+        setAzureForm(prev => ({ ...prev, ms_client_secret: '' }))
+        fetchAzureConfig()
+      }
+    } catch (err) {
+      setAzureStatus(`Error: ${err instanceof Error ? err.message : 'Unknown error'}`)
+    }
+    setAzureSaving(false)
   }
 
   const saveToken = async (e: React.FormEvent) => {
@@ -2443,7 +2516,6 @@ function SettingsTab({ session }: { session: Session }) {
     if (!tokenStatus || !tokenStatus.has_token) return 'text-red-600 bg-red-50'
     if (tokenStatus.status === 'token_expired') return 'text-red-600 bg-red-50'
     if (tokenStatus.retry_after && new Date(tokenStatus.retry_after) > new Date()) return 'text-yellow-600 bg-yellow-50'
-    // Show orange if token is active but no refresh token (will expire soon)
     if (!tokenStatus.has_refresh_token) return 'text-orange-600 bg-orange-50'
     return 'text-green-600 bg-green-50'
   }
@@ -2467,72 +2539,201 @@ function SettingsTab({ session }: { session: Session }) {
   }
 
   return (
-    <div className="bg-white p-6 rounded shadow max-w-lg">
-      <h2 className="text-lg font-bold mb-4">Microsoft Graph Token</h2>
+    <div className="bg-white p-6 rounded shadow max-w-2xl space-y-6">
+      <h2 className="text-lg font-bold">Settings</h2>
 
-      {tokenStatus && (
-        <div className={`p-3 rounded mb-4 text-sm font-medium ${statusColor()}`}>
-          Status: {statusText()}
-        </div>
-      )}
+      {/* ===== Section 1: Microsoft Graph Token ===== */}
+      <div>
+        <h3 className="text-md font-semibold mb-3 text-gray-800 border-b pb-1">Microsoft Graph Token</h3>
 
-      {/* OAuth Connect Button — recommended method */}
-      <div className="mb-6 p-4 bg-blue-50 rounded border border-blue-200">
-        <h3 className="font-medium mb-2 text-blue-800">Recommended: Connect Microsoft Account</h3>
-        <p className="text-sm text-blue-700 mb-3">
-          Sign in with Microsoft to enable automatic token refresh. Your batches won't get stuck when tokens expire.
-        </p>
-        <button
-          onClick={startOAuthFlow}
-          disabled={oauthLoading}
-          className="bg-blue-600 text-white py-2 px-4 rounded hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2"
-        >
-          {oauthLoading ? (
-            <span>Connecting...</span>
-          ) : (
-            <svg className="w-5 h-5" viewBox="0 0 21 21" fill="none"><path d="M1 1h9v9H1z" fill="#f25022"/><path d="M11 1h9v9h-9z" fill="#7fba00"/><path d="M1 11h9v9H1z" fill="#00a4ef"/><path d="M11 11h9v9h-9z" fill="#ffb900"/></svg>
-          )}
-          {oauthLoading ? 'Connecting...' : 'Connect with Microsoft'}
-        </button>
-        {tokenStatus?.has_refresh_token && (
-          <p className="mt-2 text-xs text-green-700 font-medium">
-            Auto-refresh is active — tokens will be refreshed automatically.
+        {tokenStatus && (
+          <div className={`p-3 rounded mb-4 text-sm font-medium ${statusColor()}`}>
+            Status: {statusText()}
+          </div>
+        )}
+
+        {/* OAuth Connect Button */}
+        <div className="mb-4 p-4 bg-blue-50 rounded border border-blue-200">
+          <h4 className="font-medium mb-2 text-blue-800">Connect Microsoft Account</h4>
+          <p className="text-sm text-blue-700 mb-3">
+            Sign in with Microsoft to enable automatic token refresh. No authenticator required when your organization's Azure AD app is configured below.
           </p>
+          <button
+            onClick={startOAuthFlow}
+            disabled={oauthLoading}
+            className="bg-blue-600 text-white py-2 px-4 rounded hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2"
+          >
+            {oauthLoading ? (
+              <span>Connecting...</span>
+            ) : (
+              <svg className="w-5 h-5" viewBox="0 0 21 21" fill="none"><path d="M1 1h9v9H1z" fill="#f25022"/><path d="M11 1h9v9h-9z" fill="#7fba00"/><path d="M1 11h9v9H1z" fill="#00a4ef"/><path d="M11 11h9v9h-9z" fill="#ffb900"/></svg>
+            )}
+            {oauthLoading ? 'Connecting...' : 'Connect with Microsoft'}
+          </button>
+          {tokenStatus?.has_refresh_token && (
+            <p className="mt-2 text-xs text-green-700 font-medium">
+              Auto-refresh is active — tokens will be refreshed automatically.
+            </p>
+          )}
+        </div>
+
+        {/* Manual Token Paste */}
+        <details className="mb-2">
+          <summary className="text-sm text-gray-500 cursor-pointer hover:text-gray-700">
+            Advanced: Manual token paste (tokens expire in 60-90 min)
+          </summary>
+          <form onSubmit={saveToken} className="space-y-4 mt-3">
+            <div>
+              <label className="block text-sm font-medium mb-1">Access Token</label>
+              <textarea value={accessToken} onChange={e => setAccessToken(e.target.value)}
+                rows={4} className="w-full border p-2 rounded text-sm font-mono" placeholder="Paste your Microsoft Graph access token here..." />
+              <p className="text-xs text-gray-500 mt-1">
+                Tokens expire in 60-90 minutes. Get a new one from
+                <a href="https://developer.microsoft.com/en-us/graph/graph-explorer" target="blank" className="text-blue-600 underline ml-1">Graph Explorer</a>
+              </p>
+            </div>
+            <div className="flex gap-2">
+              <button type="submit" disabled={loading || !accessToken.trim()} className="flex-1 bg-gray-800 text-white py-2 rounded disabled:opacity-50">
+                {loading ? 'Saving...' : 'Save Token'}
+              </button>
+              {tokenStatus?.has_token && (
+                <button type="button" onClick={deleteToken} disabled={loading}
+                  className="bg-red-600 text-white py-2 px-4 rounded disabled:opacity-50">
+                  Remove
+                </button>
+              )}
+            </div>
+          </form>
+        </details>
+
+        {status && (
+          <div className={`mt-3 p-2 rounded text-sm ${status.startsWith('Error') ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-800'}`}>
+            {status}
+          </div>
         )}
       </div>
 
-      {/* Manual Token Paste — fallback method */}
-      <details className="mb-4">
-        <summary className="text-sm text-gray-500 cursor-pointer hover:text-gray-700">
-          Advanced: Manual token paste (tokens expire in 60-90 min)
-        </summary>
-        <form onSubmit={saveToken} className="space-y-4 mt-3">
-          <div>
-            <label className="block text-sm font-medium mb-1">Access Token</label>
-            <textarea value={accessToken} onChange={e => setAccessToken(e.target.value)}
-              rows={4} className="w-full border p-2 rounded text-sm font-mono" placeholder="Paste your Microsoft Graph access token here..." />
-            <p className="text-xs text-gray-500 mt-1">
-              Tokens expire in 60-90 minutes. Get a new one from
-              <a href="https://developer.microsoft.com/en-us/graph/graph-explorer" target="blank" className="text-blue-600 underline ml-1">Graph Explorer</a>
-            </p>
-          </div>
-          <div className="flex gap-2">
-            <button type="submit" disabled={loading || !accessToken.trim()} className="flex-1 bg-gray-800 text-white py-2 rounded disabled:opacity-50">
-              {loading ? 'Saving...' : 'Save Token'}
-            </button>
-            {tokenStatus?.has_token && (
-              <button type="button" onClick={deleteToken} disabled={loading}
-                className="bg-red-600 text-white py-2 px-4 rounded disabled:opacity-50">
-                Remove
-              </button>
-            )}
-          </div>
-        </form>
-      </details>
+      {/* ===== Section 2: Azure AD App Configuration (Admin Only) ===== */}
+      {userRole === 'admin' && (
+        <div>
+          <h3 className="text-md font-semibold mb-3 text-gray-800 border-b pb-1">Azure AD App Configuration</h3>
+          <p className="text-sm text-gray-600 mb-3">
+            Configure your organization's Azure AD app so users can connect without an authenticator.
+            Each organization needs its own app registration in their Azure portal.
+          </p>
 
-      {status && (
-        <div className={`mt-4 p-2 rounded text-sm ${status.startsWith('Error') ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-800'}`}>
-          {status}
+          {/* Current config status */}
+          {azureConfig && (
+            <div className={`p-3 rounded mb-4 text-sm font-medium ${
+              azureConfig.has_config
+                ? 'text-green-700 bg-green-50 border border-green-200'
+                : azureConfig.has_env_fallback
+                  ? 'text-blue-700 bg-blue-50 border border-blue-200'
+                  : 'text-red-700 bg-red-50 border border-red-200'
+            }`}>
+              {azureConfig.has_config ? (
+                <>
+                  Configured (tenant-specific)
+                  <span className="block text-xs font-normal mt-1">
+                    Client ID: {azureConfig.ms_client_id} | Tenant: {azureConfig.ms_tenant_id}
+                    {azureConfig.ms_client_secret_masked && ` | Secret: ${azureConfig.ms_client_secret_masked}`}
+                  </span>
+                </>
+              ) : azureConfig.has_env_fallback ? (
+                <>
+                  Using platform-level Azure AD app (env vars)
+                  <span className="block text-xs font-normal mt-1">
+                    This works for one domain. For multi-domain support, configure tenant-specific credentials below.
+                  </span>
+                </>
+              ) : (
+                'No Azure AD app configured — OAuth login will not work until configured'
+              )}
+            </div>
+          )}
+
+          {/* Config form */}
+          <form onSubmit={saveAzureConfig} className="space-y-3">
+            <div>
+              <label className="block text-sm font-medium mb-1">Application (Client) ID</label>
+              <input
+                type="text"
+                value={azureForm.ms_client_id}
+                onChange={e => setAzureForm(prev => ({ ...prev, ms_client_id: e.target.value }))}
+                className="w-full border p-2 rounded text-sm font-mono"
+                placeholder="e.g. 3541a59f-8159-4b09-ad63-a60bcab03ec9"
+                required
+              />
+              <p className="text-xs text-gray-500 mt-1">From Azure Portal {'>'} App registrations {'>'} Your app {'>'} Overview</p>
+            </div>
+            <div>
+              <label className="block text-sm font-medium mb-1">Client Secret</label>
+              <input
+                type="password"
+                value={azureForm.ms_client_secret}
+                onChange={e => setAzureForm(prev => ({ ...prev, ms_client_secret: e.target.value }))}
+                className="w-full border p-2 rounded text-sm font-mono"
+                placeholder={azureConfig?.ms_client_secret_set ? 'Enter new secret to replace existing one' : 'Enter client secret value'}
+                required={!azureConfig?.ms_client_secret_set}
+              />
+              <p className="text-xs text-gray-500 mt-1">
+                From Azure Portal {'>'} App registrations {'>'} Certificates & secrets {'>'} New client secret
+              </p>
+            </div>
+            <div>
+              <label className="block text-sm font-medium mb-1">Directory (Tenant) ID</label>
+              <input
+                type="text"
+                value={azureForm.ms_tenant_id}
+                onChange={e => setAzureForm(prev => ({ ...prev, ms_tenant_id: e.target.value }))}
+                className="w-full border p-2 rounded text-sm font-mono"
+                placeholder="e.g. 3780d0ca-6921-4bcd-83a9-b8a47bf74088"
+                required
+              />
+              <p className="text-xs text-gray-500 mt-1">From Azure Portal {'>'} App registrations {'>'} Your app {'>'} Overview</p>
+            </div>
+
+            {/* Redirect URI info */}
+            <div className="bg-gray-50 rounded p-3 border border-gray-200">
+              <p className="text-sm font-medium text-gray-700 mb-1">Required Redirect URI</p>
+              <p className="text-xs text-gray-600 font-mono bg-white p-2 rounded border break-all">
+                https://dsrsctzumggkrmyuwodw.supabase.co/functions/v1/ms-auth/callback
+              </p>
+              <p className="text-xs text-gray-500 mt-1">
+                Add this in Azure Portal {'>'} App registrations {'>'} Authentication {'>'} Add a platform {'>'} Web
+              </p>
+            </div>
+
+            {/* Required permissions info */}
+            <div className="bg-gray-50 rounded p-3 border border-gray-200">
+              <p className="text-sm font-medium text-gray-700 mb-1">Required API Permissions (Delegated)</p>
+              <ul className="text-xs text-gray-600 list-disc list-inside space-y-0.5">
+                <li>Mail.Send</li>
+                <li>Mail.ReadWrite</li>
+                <li>Mail.ReadBasic</li>
+                <li>User.Read</li>
+                <li>User.ReadBasic.All</li>
+                <li>offline_access</li>
+              </ul>
+              <p className="text-xs text-orange-600 font-medium mt-1">
+                Important: Click "Grant admin consent" after adding permissions.
+              </p>
+            </div>
+
+            <button
+              type="submit"
+              disabled={azureSaving || (!azureForm.ms_client_id.trim() && !azureForm.ms_tenant_id.trim())}
+              className="bg-indigo-600 text-white py-2 px-4 rounded hover:bg-indigo-700 disabled:opacity-50 text-sm"
+            >
+              {azureSaving ? 'Saving...' : 'Save Azure AD Configuration'}
+            </button>
+          </form>
+
+          {azureStatus && (
+            <div className={`mt-3 p-2 rounded text-sm ${azureStatus.startsWith('Error') ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-800'}`}>
+              {azureStatus}
+            </div>
+          )}
         </div>
       )}
     </div>
