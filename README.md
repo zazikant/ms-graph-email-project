@@ -23,3 +23,28 @@ The flow for a new tenant:
 
 The edge functions dynamically fetch credentials using tenant.ms_client_id, tenant.ms_client_secret, tenant.ms_tenant_id from the current user's tenant — never hardcoded. So Company A (gem-engserv.net) and Company B (acme.com) each use their own Azure AD app, their own tokens, and their own data. Completely isolated! 🏢✅
 
+
+
+# manual sql query to set up Azure Credentials from supabase. just run this queey and batch mails automatically sent.
+
+That's the problem! Your Azure AD credentials are **not stored in the `tenants` table** — they're all null. That's why server-side token refresh keeps failing.
+
+Your tenant ID is `d15bd162-02e7-4854-bfec-5f055a64903a`. You need to fill in your actual Azure AD values. Run this in SQL Editor — replace the placeholder values with your real ones:
+
+```sql
+UPDATE tenants 
+SET ms_client_id = 'YOUR_ACTUAL_CLIENT_ID',
+    ms_client_secret = 'YOUR_ACTUAL_CLIENT_SECRET',
+    ms_tenant_id = 'YOUR_ACTUAL_AZURE_TENANT_ID'
+WHERE id = 'd15bd162-02e7-4854-bfec-5f055a64903a';
+```
+
+You can find your values in:
+- **Azure Portal → App registrations → your app → Overview** (for Client ID and Tenant ID)
+- **Certificates & secrets** (for Client Secret)
+
+Or alternatively, **re-save them in the Settings page** of your app — that calls the `manage-azure-config` edge function which should write to the `tenants` table. Maybe the initial save failed silently.
+
+Either way, once those 3 fields are populated, the batch will start processing within 5 minutes (your token is already active right now, so it should go immediately!). 
+
+Let me know once you've updated! 🚀
