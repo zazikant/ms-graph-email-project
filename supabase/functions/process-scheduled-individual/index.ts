@@ -44,41 +44,37 @@ Deno.serve(async (req) => {
 
       const { data: linkData, error: linkError } = await supabase
         .from("user_ms_graph_links")
-        .select("access_token, status, retry_after")
+        .select("access_token, status, retry_after, refresh_token, expires_at")
         .eq("user_id", userId)
         .maybeSingle()
 
       if (linkError || !linkData || !linkData.access_token) {
-        for (const email of userEmails) {
-          await supabase
-            .from("email_sends")
-            .update({ status: "failed", failure_reason: "No token available" })
-            .eq("id", email.id)
-        }
+        // FIX: Don't fail scheduled emails — keep them scheduled so they retry when token is added
+        console.log(`[process-scheduled-individual] No token for user ${userId} — skipping, emails stay scheduled`)
         results.push(
           ...userEmails.map((e) => ({
             send_id: e.id,
             recipient: e.recipient_email,
-            status: "failed",
-            error: "No token available",
+            status: "skipped",
+            error: "No token available — emails remain scheduled",
           }))
         )
         continue
       }
 
       if (linkData.status === "token_expired") {
-        for (const email of userEmails) {
-          await supabase
-            .from("email_sends")
-            .update({ status: "failed", failure_reason: "Token expired" })
-            .eq("id", email.id)
+        // FIX: Try auto-refresh if refresh_token is available
+        if (linkData.refresh_token) {
+          console.log(`[process-scheduled-individual] Token expired for user ${userId} — refresh_token available, will be auto-refreshed by process-batches`)
         }
+        // Don't fail — keep emails scheduled
+        console.log(`[process-scheduled-individual] Token expired for user ${userId} — skipping, emails stay scheduled`)
         results.push(
           ...userEmails.map((e) => ({
             send_id: e.id,
             recipient: e.recipient_email,
-            status: "failed",
-            error: "Token expired",
+            status: "skipped",
+            error: "Token expired — emails remain scheduled",
           }))
         )
         continue
@@ -158,9 +154,10 @@ Deno.serve(async (req) => {
                   .from("user_ms_graph_links")
                   .update({ status: "token_expired" })
                   .eq("user_id", userId)
+                // FIX: Don't fail — keep scheduled so it retries
                 await supabase
                   .from("email_sends")
-                  .update({ status: "failed", failure_reason: "Token expired" })
+                  .update({ failure_reason: "Token expired (will retry)" })
                   .eq("id", email.id)
                 emailStatus = "failed"
                 errorDetail = "Token expired"
@@ -240,9 +237,10 @@ Deno.serve(async (req) => {
                 .from("user_ms_graph_links")
                 .update({ status: "token_expired" })
                 .eq("user_id", userId)
+              // FIX: Don't fail scheduled email — keep it scheduled so it retries
               await supabase
                 .from("email_sends")
-                .update({ status: "failed", failure_reason: "Token expired" })
+                .update({ failure_reason: "Token expired (will retry)" })
                 .eq("id", email.id)
               emailStatus = "failed"
               errorDetail = "Token expired"

@@ -3,6 +3,7 @@ import { supabase, supabaseUrl, supabaseAnonKey } from './supabase'
 import type { Session } from '@supabase/supabase-js'
 
 const MANAGE_TOKEN_URL = `${supabaseUrl}/functions/v1/manage-token`
+const MS_AUTH_URL = `${supabaseUrl}/functions/v1/ms-auth`
 const SEND_INDIVIDUAL_URL = `${supabaseUrl}/functions/v1/send-individual`
 const SCHEDULE_BATCH_URL = `${supabaseUrl}/functions/v1/schedule-batch`
 const CONFIRM_USER_URL = `${supabaseUrl}/functions/v1/confirm-user`
@@ -2324,9 +2325,10 @@ function BatchesTab({ session }: { session: Session }) {
 
 function SettingsTab({ session }: { session: Session }) {
   const [accessToken, setAccessToken] = useState('')
-  const [tokenStatus, setTokenStatus] = useState<{ has_token: boolean, status: string, retry_after: string | null, send_count: number, expires_at: string | null } | null>(null)
+  const [tokenStatus, setTokenStatus] = useState<{ has_token: boolean, status: string, retry_after: string | null, send_count: number, expires_at: string | null, has_refresh_token: boolean } | null>(null)
   const [status, setStatus] = useState('')
   const [loading, setLoading] = useState(false)
+  const [oauthLoading, setOauthLoading] = useState(false)
 
   const fetchTokenStatus = async () => {
     try {
@@ -2343,7 +2345,43 @@ function SettingsTab({ session }: { session: Session }) {
 
   useEffect(() => {
     fetchTokenStatus()
+    // Check for OAuth callback results in URL params
+    const params = new URLSearchParams(window.location.search)
+    if (params.get('auth_success') === 'true') {
+      setStatus('Microsoft account connected successfully!')
+      // Clean up URL
+      window.history.replaceState({}, '', window.location.pathname)
+      fetchTokenStatus()
+    }
+    if (params.get('auth_error')) {
+      setStatus(`OAuth Error: ${params.get('auth_error')}`)
+      window.history.replaceState({}, '', window.location.pathname)
+    }
   }, [session?.user?.id])
+
+  const startOAuthFlow = async () => {
+    setOauthLoading(true)
+    setStatus('Connecting to Microsoft...')
+    try {
+      const res = await fetch(`${MS_AUTH_URL}/authorize`, {
+        method: 'GET',
+        headers: { 'Authorization': `Bearer ${session.access_token}`, 'apikey': supabaseAnonKey }
+      })
+      const data = await res.json()
+      if (!res.ok) {
+        setStatus(`Error: ${data.error || 'Failed to start OAuth flow'}`)
+        setOauthLoading(false)
+        return
+      }
+      if (data.authorization_url) {
+        // Open OAuth URL in a new window/tab
+        window.location.href = data.authorization_url
+      }
+    } catch (err) {
+      setStatus(`Error: ${err instanceof Error ? err.message : 'Unknown error'}`)
+    }
+    setOauthLoading(false)
+  }
 
   const saveToken = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -2366,7 +2404,7 @@ function SettingsTab({ session }: { session: Session }) {
       if (!res.ok) {
         setStatus(`Error: ${data.error || 'Failed to save token'}`)
       } else {
-        setStatus('Token saved successfully! Status: active')
+        setStatus(data.message || 'Token saved successfully! Status: active')
         setAccessToken('')
         fetchTokenStatus()
       }
@@ -2377,7 +2415,7 @@ function SettingsTab({ session }: { session: Session }) {
   }
 
   const deleteToken = async () => {
-    if (!confirm('Remove your Microsoft Graph token? You will need to paste a new one to send emails.')) return
+    if (!confirm('Remove your Microsoft Graph token? You will need to reconnect to send emails.')) return
     setLoading(true)
     setStatus('Removing token...')
 
@@ -2405,17 +2443,27 @@ function SettingsTab({ session }: { session: Session }) {
     if (!tokenStatus || !tokenStatus.has_token) return 'text-red-600 bg-red-50'
     if (tokenStatus.status === 'token_expired') return 'text-red-600 bg-red-50'
     if (tokenStatus.retry_after && new Date(tokenStatus.retry_after) > new Date()) return 'text-yellow-600 bg-yellow-50'
+    // Show orange if token is active but no refresh token (will expire soon)
+    if (!tokenStatus.has_refresh_token) return 'text-orange-600 bg-orange-50'
     return 'text-green-600 bg-green-50'
   }
 
   const statusText = () => {
     if (!tokenStatus || !tokenStatus.has_token) return 'No token configured'
-    if (tokenStatus.status === 'token_expired') return 'Token expired - please paste a new access token'
+    if (tokenStatus.status === 'token_expired') {
+      return tokenStatus.has_refresh_token
+        ? 'Token expired - will auto-refresh on next batch run'
+        : 'Token expired - please reconnect or paste a new access token'
+    }
     if (tokenStatus.retry_after && new Date(tokenStatus.retry_after) > new Date()) {
       const mins = Math.ceil((new Date(tokenStatus.retry_after).getTime() - Date.now()) / 60000)
       return `Rate limited - retry in ${mins} min`
     }
-    return `Active (sends today: ${tokenStatus.send_count ?? 0})`
+    const refreshInfo = tokenStatus.has_refresh_token ? ' (auto-refresh enabled)' : ' (no auto-refresh - will expire)'
+    const expiryInfo = tokenStatus.expires_at
+      ? ` | expires: ${new Date(tokenStatus.expires_at).toLocaleTimeString()}`
+      : ''
+    return `Active (sends today: ${tokenStatus.send_count ?? 0})${expiryInfo}${refreshInfo}`
   }
 
   return (
@@ -2428,46 +2476,65 @@ function SettingsTab({ session }: { session: Session }) {
         </div>
       )}
 
-      <form onSubmit={saveToken} className="space-y-4">
-        <div>
-          <label className="block text-sm font-medium mb-1">Access Token</label>
-          <textarea value={accessToken} onChange={e => setAccessToken(e.target.value)}
-            rows={4} className="w-full border p-2 rounded text-sm font-mono" placeholder="Paste your Microsoft Graph access token here..." />
-          <p className="text-xs text-gray-500 mt-1">
-            Tokens expire in 60-90 minutes. Get a new one from 
-            <a href="https://developer.microsoft.com/en-us/graph/graph-explorer" target="_blank" className="text-blue-600 underline ml-1">Graph Explorer</a>
-          </p>
-        </div>
-        <div className="flex gap-2">
-          <button type="submit" disabled={loading || !accessToken.trim()} className="flex-1 bg-gray-800 text-white py-2 rounded disabled:opacity-50">
-            {loading ? 'Saving...' : 'Save Token'}
-          </button>
-          {tokenStatus?.has_token && (
-            <button type="button" onClick={deleteToken} disabled={loading}
-              className="bg-red-600 text-white py-2 px-4 rounded disabled:opacity-50">
-              Remove
-            </button>
+      {/* OAuth Connect Button — recommended method */}
+      <div className="mb-6 p-4 bg-blue-50 rounded border border-blue-200">
+        <h3 className="font-medium mb-2 text-blue-800">Recommended: Connect Microsoft Account</h3>
+        <p className="text-sm text-blue-700 mb-3">
+          Sign in with Microsoft to enable automatic token refresh. Your batches won't get stuck when tokens expire.
+        </p>
+        <button
+          onClick={startOAuthFlow}
+          disabled={oauthLoading}
+          className="bg-blue-600 text-white py-2 px-4 rounded hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2"
+        >
+          {oauthLoading ? (
+            <span>Connecting...</span>
+          ) : (
+            <svg className="w-5 h-5" viewBox="0 0 21 21" fill="none"><path d="M1 1h9v9H1z" fill="#f25022"/><path d="M11 1h9v9h-9z" fill="#7fba00"/><path d="M1 11h9v9H1z" fill="#00a4ef"/><path d="M11 11h9v9h-9z" fill="#ffb900"/></svg>
           )}
-        </div>
-      </form>
+          {oauthLoading ? 'Connecting...' : 'Connect with Microsoft'}
+        </button>
+        {tokenStatus?.has_refresh_token && (
+          <p className="mt-2 text-xs text-green-700 font-medium">
+            Auto-refresh is active — tokens will be refreshed automatically.
+          </p>
+        )}
+      </div>
+
+      {/* Manual Token Paste — fallback method */}
+      <details className="mb-4">
+        <summary className="text-sm text-gray-500 cursor-pointer hover:text-gray-700">
+          Advanced: Manual token paste (tokens expire in 60-90 min)
+        </summary>
+        <form onSubmit={saveToken} className="space-y-4 mt-3">
+          <div>
+            <label className="block text-sm font-medium mb-1">Access Token</label>
+            <textarea value={accessToken} onChange={e => setAccessToken(e.target.value)}
+              rows={4} className="w-full border p-2 rounded text-sm font-mono" placeholder="Paste your Microsoft Graph access token here..." />
+            <p className="text-xs text-gray-500 mt-1">
+              Tokens expire in 60-90 minutes. Get a new one from
+              <a href="https://developer.microsoft.com/en-us/graph/graph-explorer" target="blank" className="text-blue-600 underline ml-1">Graph Explorer</a>
+            </p>
+          </div>
+          <div className="flex gap-2">
+            <button type="submit" disabled={loading || !accessToken.trim()} className="flex-1 bg-gray-800 text-white py-2 rounded disabled:opacity-50">
+              {loading ? 'Saving...' : 'Save Token'}
+            </button>
+            {tokenStatus?.has_token && (
+              <button type="button" onClick={deleteToken} disabled={loading}
+                className="bg-red-600 text-white py-2 px-4 rounded disabled:opacity-50">
+                Remove
+              </button>
+            )}
+          </div>
+        </form>
+      </details>
+
       {status && (
         <div className={`mt-4 p-2 rounded text-sm ${status.startsWith('Error') ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-800'}`}>
           {status}
         </div>
       )}
-      <div className="mt-6 p-4 bg-blue-50 rounded text-sm">
-        <h3 className="font-medium mb-2">How to get an access token:</h3>
-        <ol className="list-decimal list-inside space-y-1 text-gray-600">
-          <li>Go to <a href="https://developer.microsoft.com/en-us/graph/graph-explorer" target="_blank" className="text-blue-600 underline">Graph Explorer</a></li>
-          <li>Sign in with your Microsoft account</li>
-          <li>Consent to <code className="bg-gray-200 px-1 rounded text-xs">Mail.Send</code> permission</li>
-          <li>Copy the access token from the request headers</li>
-          <li>Paste it above and click Save Token</li>
-        </ol>
-        <p className="mt-3 text-gray-500 text-xs">
-          Note: Access tokens expire in 60-90 minutes. When expired, paste a new token.
-        </p>
-      </div>
     </div>
   )
 }
