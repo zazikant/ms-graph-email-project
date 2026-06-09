@@ -417,12 +417,14 @@ function ComposeTab({ session, attachments, setAttachments }: { session: Session
   const [recipientMode, setRecipientMode] = useState<'single' | 'list'>('single')
 
   const BUCKET_NAME = 'dfsdfsdf'
+  const [tenantId, setTenantId] = useState<string | null>(null)
 
   useEffect(() => {
     if (!session?.user?.id) return
-    const fetchFilesForPicker = async () => {
+    const fetchTenantAndFiles = async () => {
       const { data: membership } = await supabase.from('memberships').select('tenant_id').eq('user_id', session.user.id).single()
       if (!membership) return
+      setTenantId(membership.tenant_id)
       const { data } = await supabase.storage.from(BUCKET_NAME).list(membership.tenant_id, { limit: 100 })
       if (data) {
         setAvailableFiles(data.map(f => ({
@@ -432,7 +434,7 @@ function ComposeTab({ session, attachments, setAttachments }: { session: Session
         })))
       }
     }
-    fetchFilesForPicker()
+    fetchTenantAndFiles()
   }, [session?.user?.id])
 
   useEffect(() => {
@@ -464,13 +466,13 @@ function ComposeTab({ session, attachments, setAttachments }: { session: Session
   }
 
   const refreshFiles = () => {
-    if (!session?.user?.id) return
-    supabase.storage.from(BUCKET_NAME).list(session.user.id, { limit: 100 })
+    if (!tenantId) return
+    supabase.storage.from(BUCKET_NAME).list(tenantId, { limit: 100 })
       .then(({ data }) => {
         if (data) {
           setAvailableFiles(data.map(f => ({
             name: f.name,
-            path: `${session.user.id}/${f.name}`,
+            path: `${tenantId}/${f.name}`,
             size: f.metadata?.size || 0
           })))
         }
@@ -523,13 +525,13 @@ function ComposeTab({ session, attachments, setAttachments }: { session: Session
   }
 
   const handleFileUpload = async () => {
-    if (!fileToUpload || !session?.user?.id) return
+    if (!fileToUpload || !tenantId) return
     setUploadingFile(true)
     try {
       const ext = fileToUpload.name.split('.').pop()
       const baseName = fileToUpload.name.replace(`.${ext}`, '')
       const timestamp = Date.now()
-      const uniquePath = `${session.user.id}/${timestamp}-${baseName}.${ext}`
+      const uniquePath = `${tenantId}/${timestamp}-${baseName}.${ext}`
       
       const { error } = await supabase.storage.from(BUCKET_NAME).upload(uniquePath, fileToUpload, {
         cacheControl: '3600',
@@ -1831,7 +1833,7 @@ function FilesTab({ session }: { session: Session }) {
 
     if (!confirm(confirmMsg)) return
 
-    const pathsToDelete = filesToDelete.map(f => `${session.user.id}/${f.name}`)
+    const pathsToDelete = filesToDelete.map(f => `${tenantId}/${f.name}`)
     const { error } = await supabase.storage.from(BUCKET_NAME).remove(pathsToDelete)
     if (error) {
       alert(`Delete failed: ${error.message}`)
@@ -1885,7 +1887,7 @@ function FilesTab({ session }: { session: Session }) {
         <>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {paginatedFiles.map((file) => {
-            const fullPath = `${session.user.id}/${file.name}`
+            const fullPath = `${tenantId}/${file.name}`
             return (
               <div key={file.id} className="border rounded p-4 hover:shadow-md transition-shadow">
                 <div className="flex items-start justify-between">
