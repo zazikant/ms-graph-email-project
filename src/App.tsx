@@ -721,7 +721,7 @@ function ComposeTab({ session, attachments, setAttachments }: { session: Session
               className="text-xs text-blue-600 hover:underline"
               title="Insert contact name placeholder"
             >
-              + Insert {name}
+              + Insert {'{name}'}
             </button>
             <span className="text-xs text-gray-400">| Available: {'{name}'}</span>
           </div>
