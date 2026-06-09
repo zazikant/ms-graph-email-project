@@ -40,3 +40,8 @@ verify_jwt = false
 [functions.cleanup-old-files]
 enabled = true
 verify_jwt = false
+
+[functions.detect-bounces]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/detect-bounces/index.ts"
