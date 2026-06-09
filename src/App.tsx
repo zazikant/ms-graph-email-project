@@ -1304,7 +1304,7 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
           <button onClick={() => setShowDeleteModal(true)} className="bg-red-600 text-white px-3 py-2 rounded text-sm hover:bg-red-700">
             {hasFilters ? `Delete (${filteredContacts.length})` : `Delete All (${contacts.length})`}
           </button>
-        )
+        )}
         <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className="border p-2 rounded text-sm">
           <option value="">All Status</option>
           <option value="subscribed">Subscribed</option>
