@@ -331,7 +331,23 @@ Deno.serve(async (req) => {
       let rateLimited = false
 
       for (const batch of userBatchList) {
-        if (Date.now() - userStart > timeSlicePerUser) break
+        if (Date.now() - userStart > timeSlicePerUser) {
+          // Time slice expired — revert batch to pending so next cron run picks it up
+          await supabase.rpc("update_batch_counts", { p_batch_id: batch.batch_id })
+          const { data: batchCheck } = await supabase
+            .from("batches")
+            .select("sent_count, total_count")
+            .eq("id", batch.batch_id)
+            .maybeSingle()
+          if (batchCheck && batchCheck.sent_count < batchCheck.total_count) {
+            await supabase
+              .from("batches")
+              .update({ status: "pending" })
+              .eq("id", batch.batch_id)
+            console.log(`[process-batches] Time slice expired — batch ${batch.batch_id} reverted to pending (${batchCheck.sent_count}/${batchCheck.total_count} sent)`)
+          }
+          break
+        }
         if (tokenExpired || rateLimited) break
 
         await supabase
@@ -370,7 +386,11 @@ Deno.serve(async (req) => {
         }
 
         for (const recipient of recipients) {
-          if (Date.now() - startTime > MAX_RUNTIME_MS) break
+          if (Date.now() - startTime > MAX_RUNTIME_MS) {
+            // Global timeout — break and let the post-loop logic revert batch to pending
+            console.log(`[process-batches] Global runtime limit reached at ${batchSent + batchFailed}/${recipients.length} recipients for batch ${batch.batch_id}`)
+            break
+          }
           if (tokenExpired || rateLimited) break
 
           const trackingId = recipient.tracking_id
@@ -707,26 +727,23 @@ Deno.serve(async (req) => {
           await new Promise((r) => setTimeout(r, 200))
         }
 
-        // FIX #5: If token expired mid-batch, set batch back to pending (not failed)
-        // so remaining recipients can be sent when token is refreshed
-        if (tokenExpired) {
-          // Check if batch has remaining pending recipients
-          await supabase.rpc("update_batch_counts", { p_batch_id: batch.batch_id })
-          const { data: batchCheck } = await supabase
+        // FIX #5: If batch incomplete (timeout, token expired, rate limited), 
+        // set batch back to pending so remaining recipients can be sent on next cron run
+        await supabase.rpc("update_batch_counts", { p_batch_id: batch.batch_id })
+        const { data: batchCheck } = await supabase
+          .from("batches")
+          .select("sent_count, failed_count, total_count")
+          .eq("id", batch.batch_id)
+          .maybeSingle()
+        
+        if (batchCheck && (batchCheck.sent_count + batchCheck.failed_count) < batchCheck.total_count) {
+          // Batch still has unsent recipients — revert to pending for next cron run
+          const reason = tokenExpired ? "token expired" : rateLimited ? "rate limited" : "timeout/partial"
+          await supabase
             .from("batches")
-            .select("sent_count, failed_count, total_count")
+            .update({ status: "pending" })
             .eq("id", batch.batch_id)
-            .maybeSingle()
-          if (batchCheck && batchCheck.sent_count < batchCheck.total_count) {
-            // Revert batch to pending so it can be retried
-            await supabase
-              .from("batches")
-              .update({ status: "pending" })
-              .eq("id", batch.batch_id)
-            console.log(`[process-batches] Batch ${batch.batch_id} reverted to pending after token expiry (${batchCheck.sent_count}/${batchCheck.total_count} sent)`)
-          }
-        } else {
-          await supabase.rpc("update_batch_counts", { p_batch_id: batch.batch_id })
+          console.log(`[process-batches] Batch ${batch.batch_id} reverted to pending (${reason}: ${batchCheck.sent_count}/${batchCheck.total_count} sent)`)
         }
 
         results.push({
