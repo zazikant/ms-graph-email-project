@@ -899,6 +899,7 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
   const [dateTo, setDateTo] = useState('')
   const [uploading, setUploading] = useState(false)
   const [currentPage, setCurrentPage] = useState(1)
+  const [showDeleteModal, setShowDeleteModal] = useState(false)
   const CONTACTS_PER_PAGE = 10
 
   const fetchData = async () => {
@@ -1216,23 +1217,20 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
     if (currentPage < totalPages) setCurrentPage(currentPage + 1)
   }
 
-  const hasSearchFilters = searchEmail || searchName
-
   const deleteFilteredContacts = async () => {
-    const contactsToDelete = hasSearchFilters ? filteredContacts : contacts
+    const contactsToDelete = hasFilters ? filteredContacts : contacts
     if (contactsToDelete.length === 0) return
-
-    const confirmMsg = hasSearchFilters
-      ? `Delete ${contactsToDelete.length} filtered contacts? This cannot be undone.`
-      : `Delete ALL ${contactsToDelete.length} contacts? This cannot be undone.`
-
-    if (!confirm(confirmMsg)) return
 
     const contactIds = contactsToDelete.map(c => c.id)
     for (const id of contactIds) {
       await supabase.from('contacts').delete().eq('id', id)
     }
+    setShowDeleteModal(false)
     fetchData()
+  }
+
+  const getDeleteCount = () => {
+    return hasFilters ? filteredContacts.length : contacts.length
   }
 
   const getListName = (listId: string | null) => {
@@ -1303,10 +1301,10 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
         />
         <label htmlFor="exactMatchContact" className="text-sm">Exact</label>
         {contacts.length > 0 && (
-          <button onClick={deleteFilteredContacts} className="bg-red-600 text-white px-3 py-2 rounded text-sm hover:bg-red-700">
-            {hasSearchFilters ? `Delete (${filteredContacts.length})` : `Delete All (${contacts.length})`}
+          <button onClick={() => setShowDeleteModal(true)} className="bg-red-600 text-white px-3 py-2 rounded text-sm hover:bg-red-700">
+            {hasFilters ? `Delete (${filteredContacts.length})` : `Delete All (${contacts.length})`}
           </button>
-        )}
+        )
         <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className="border p-2 rounded text-sm">
           <option value="">All Status</option>
           <option value="subscribed">Subscribed</option>
@@ -1372,6 +1370,36 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
         </>
       )}
     </div>
+
+    {/* Delete Confirmation Modal */}
+    {showDeleteModal && (
+      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4 shadow-xl">
+          <h3 className="text-lg font-bold text-red-600 mb-3">Confirm Deletion</h3>
+          <p className="text-gray-700 mb-2">
+            {hasFilters
+              ? `You are about to delete ${filteredContacts.length} filtered contact(s). This includes contacts matching your current filters (status, list, date, search).`
+              : `You are about to delete ALL ${contacts.length} contact(s).`}
+          </p>
+          <p className="text-sm text-red-600 font-medium mb-4">This action cannot be undone.</p>
+          <div className="flex justify-end gap-3">
+            <button
+              onClick={() => setShowDeleteModal(false)}
+              className="px-4 py-2 border border-gray-300 rounded text-gray-700 hover:bg-gray-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={deleteFilteredContacts}
+              className="px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700"
+            >
+              Yes, Delete
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+    </div>
   )
 }
 
@@ -1414,6 +1442,7 @@ function HistoryTab({ session }: { session: Session }) {
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
   const [tenantId, setTenantId] = useState<string | null>(null)
+  const [contactNames, setContactNames] = useState<Record<string, string>>({})
   const [currentPage, setCurrentPage] = useState(1)
   const SENDS_PER_PAGE = 10
 
@@ -1449,6 +1478,17 @@ function HistoryTab({ session }: { session: Session }) {
           setEvents(evtMap)
         }
       }
+
+      // Fetch contact names for recipient lookup in CSV
+      const { data: contactData } = await supabase.from('contacts').select('email, name').eq('tenant_id', membership.tenant_id)
+      if (contactData) {
+        const nameMap: Record<string, string> = {}
+        contactData.forEach((c: { email: string; name: string | null }) => {
+          if (c.name) nameMap[c.email.toLowerCase()] = c.name
+        })
+        setContactNames(nameMap)
+      }
+
       setLoading(false)
     }
     fetchData()
@@ -1510,7 +1550,7 @@ function HistoryTab({ session }: { session: Session }) {
 
   const downloadCSV = () => {
     const dataToExport = hasFilters ? filteredSends : sends
-    const headers = ['Date (IST)', 'Recipient', 'Subject', 'Status', 'Attachments', 'Opens', 'Clicks', 'First Open (IST)', 'First Click (IST)', 'All Events']
+    const headers = ['Date (IST)', 'Recipient Name', 'Recipient Email', 'Subject', 'Status', 'Attachments', 'Opens', 'Clicks', 'First Open (IST)', 'First Click (IST)', 'All Events']
     const rows = dataToExport.map(s => {
       const atts = attachments[s.id] || []
       const evtList = events[s.id] || []
@@ -1521,6 +1561,7 @@ function HistoryTab({ session }: { session: Session }) {
       const allEvents = evtList.map(e => `${e.event_type}:${formatIST(e.created_at)}${e.clicked_url ? ':' + e.clicked_url : ''}`).join('; ')
       const row = [
         formatIST(s.created_at),
+        contactNames[s.recipient_email.toLowerCase()] || '',
         s.recipient_email,
         s.subject,
         s.status,
