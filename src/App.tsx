@@ -2372,6 +2372,10 @@ function SettingsTab({ session }: { session: Session }) {
         setAzureConfig(data)
         if (data.ms_client_id) setAzureForm(prev => ({ ...prev, ms_client_id: data.ms_client_id }))
         if (data.ms_tenant_id) setAzureForm(prev => ({ ...prev, ms_tenant_id: data.ms_tenant_id }))
+        // Auto-open setup guide if Azure AD is not configured at all
+        if (!data.has_config && !data.has_env_fallback) {
+          setShowSetupGuide(true)
+        }
       }
     } catch {}
   }
@@ -2692,9 +2696,9 @@ function SettingsTab({ session }: { session: Session }) {
             <h3 className="text-md font-semibold text-gray-800">Azure AD App Configuration</h3>
             <button
               onClick={() => setShowSetupGuide(!showSetupGuide)}
-              className="text-xs text-blue-600 hover:underline"
+              className="text-sm text-blue-600 hover:underline font-medium"
             >
-              {showSetupGuide ? 'Hide setup guide' : 'Show setup guide'}
+              {showSetupGuide ? 'Hide setup guide' : 'How to set up Azure AD (Step-by-Step Guide)'}
             </button>
           </div>
 
