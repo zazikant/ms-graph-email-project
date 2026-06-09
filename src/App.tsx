@@ -978,6 +978,43 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
     fetchData()
   }
 
+  /**
+   * Parse a single CSV line respecting quoted fields (RFC 4180).
+   * E.g. 'john@example.com,"Smith, John",subscribed,"My List, Inc"' → ["john@example.com", "Smith, John", "subscribed", "My List, Inc"]
+   */
+  const parseCSVLine = (line: string): string[] => {
+    const fields: string[] = []
+    let current = ''
+    let inQuotes = false
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i]
+      if (inQuotes) {
+        if (ch === '"') {
+          // Check for escaped quote ("")
+          if (i + 1 < line.length && line[i + 1] === '"') {
+            current += '"'
+            i++ // skip next quote
+          } else {
+            inQuotes = false // end of quoted field
+          }
+        } else {
+          current += ch
+        }
+      } else {
+        if (ch === '"') {
+          inQuotes = true
+        } else if (ch === ',') {
+          fields.push(current.trim())
+          current = ''
+        } else {
+          current += ch
+        }
+      }
+    }
+    fields.push(current.trim())
+    return fields
+  }
+
   const handleBulkUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
@@ -985,14 +1022,14 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
     setUploading(true)
     try {
       const text = await file.text()
-      const lines = text.split('\n').filter(l => l.trim())
+      const lines = text.split(/\r?\n/).filter(l => l.trim())
       if (lines.length < 2) {
         alert('CSV file is empty or has no data rows')
         setUploading(false)
         return
       }
 
-      const header = lines[0].toLowerCase().split(',').map(h => h.trim())
+      const header = parseCSVLine(lines[0]).map(h => h.toLowerCase().replace(/^"|"$/g, ''))
       const emailIdx = header.indexOf('email')
       const nameIdx = header.indexOf('name')
       const statusIdx = header.indexOf('status')
@@ -1014,14 +1051,14 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
       let updated = 0
 
       for (let i = 1; i < lines.length; i++) {
-        const cols = lines[i].split(',').map(c => c.trim())
-        const email = cols[emailIdx]?.toLowerCase()
+        const cols = parseCSVLine(lines[i])
+        const email = cols[emailIdx]?.toLowerCase().replace(/^"|"$/g, '')
         if (!email) continue
 
-        const name = nameIdx !== -1 ? cols[nameIdx] || null : null
-        const statusVal = statusIdx !== -1 ? (cols[statusIdx]?.toLowerCase() || 'subscribed') : 'subscribed'
+        const name = nameIdx !== -1 ? (cols[nameIdx]?.replace(/^"|"$/g, '') || null) : null
+        const statusVal = statusIdx !== -1 ? (cols[statusIdx]?.toLowerCase().replace(/^"|"$/g, '') || 'subscribed') : 'subscribed'
         const validStatus = ['subscribed', 'unsubscribed', 'hardbounced'].includes(statusVal) ? statusVal : 'subscribed'
-        const listName = listIdx !== -1 ? cols[listIdx]?.toLowerCase() : null
+        const listName = listIdx !== -1 ? cols[listIdx]?.toLowerCase().replace(/^"|"$/g, '') : null
         const listId = listName ? listNameToId[listName] || null : null
 
         const { data: existing } = await supabase
