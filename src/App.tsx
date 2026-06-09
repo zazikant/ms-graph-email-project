@@ -1073,6 +1073,30 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
     URL.revokeObjectURL(url)
   }
 
+  const downloadContactsCSV = () => {
+    const data = filteredContacts
+    if (data.length === 0) {
+      alert('No contacts to download.')
+      return
+    }
+    const header = 'email,name,status,list'
+    const rows = data.map(c => {
+      const listName = c.list_id ? (lists.find(l => l.id === c.list_id)?.name || '') : ''
+      const email = c.email.includes(',') ? `"${c.email}"` : c.email
+      const name = c.name ? (c.name.includes(',') ? `"${c.name}"` : c.name) : ''
+      return `${email},${name},${c.status},${listName}`
+    })
+    const csv = [header, ...rows].join('\n')
+    const blob = new Blob([csv], { type: 'text/csv' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    const filterLabel = hasFilters ? 'filtered' : 'all'
+    a.download = `contacts-${filterLabel}-${new Date().toISOString().slice(0, 10)}.csv`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
   const clearFilters = () => {
     setSearchEmail('')
     setSearchName('')
@@ -1169,6 +1193,9 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
           {uploading ? 'Uploading...' : 'Upload CSV'}
           <input type="file" accept=".csv" onChange={handleBulkUpload} className="hidden" disabled={uploading} />
         </label>
+        <button onClick={downloadContactsCSV} className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700">
+          Download CSV
+        </button>
         <button onClick={downloadTemplate} className="text-blue-600 hover:underline text-sm">
           Download Template
         </button>
