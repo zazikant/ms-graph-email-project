@@ -978,43 +978,6 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
     fetchData()
   }
 
-  /**
-   * Parse a single CSV line respecting quoted fields (RFC 4180).
-   * E.g. 'john@example.com,"Smith, John",subscribed,"My List, Inc"' → ["john@example.com", "Smith, John", "subscribed", "My List, Inc"]
-   */
-  const parseCSVLine = (line: string): string[] => {
-    const fields: string[] = []
-    let current = ''
-    let inQuotes = false
-    for (let i = 0; i < line.length; i++) {
-      const ch = line[i]
-      if (inQuotes) {
-        if (ch === '"') {
-          // Check for escaped quote ("")
-          if (i + 1 < line.length && line[i + 1] === '"') {
-            current += '"'
-            i++ // skip next quote
-          } else {
-            inQuotes = false // end of quoted field
-          }
-        } else {
-          current += ch
-        }
-      } else {
-        if (ch === '"') {
-          inQuotes = true
-        } else if (ch === ',') {
-          fields.push(current.trim())
-          current = ''
-        } else {
-          current += ch
-        }
-      }
-    }
-    fields.push(current.trim())
-    return fields
-  }
-
   // Parse entire CSV text into rows, handling multi-line quoted fields per RFC 4180
   const parseCSVText = (text: string): string[][] => {
     const rows: string[][] = []
