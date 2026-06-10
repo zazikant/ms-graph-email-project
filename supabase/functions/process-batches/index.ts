@@ -2,11 +2,80 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts"
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.0"
 import { encodeBase64 } from "jsr:@std/encoding/base64"
 
+interface OAuthConfig {
+  clientId: string
+  clientSecret: string
+  tenantId: string
+  authorityHost: string
+  source: "user" | "tenant" | "environment" | "none"
+}
+
 /**
- * Token refresh helper — uses refresh_token (if available) + tenant OAuth credentials
- * to obtain a new access token from Microsoft Entra ID.
+ * 3-tier lookup: per-user -> per-tenant -> env.
+ * Inlined to avoid cross-function import map dependencies.
+ */
+async function getOAuthConfig(
+  supabase: ReturnType<typeof createClient>,
+  userId: string
+): Promise<OAuthConfig | null> {
+  const { data: row, error: rpcErr } = await supabase.rpc("get_effective_azure_config", {
+    p_user_id: userId,
+  })
+
+  if (!rpcErr && row && row.length > 0 && row[0].client_id) {
+    let secret = ""
+    if (row[0].source === "user") {
+      const { data: ul } = await supabase
+        .from("user_ms_graph_links")
+        .select("ms_client_secret")
+        .eq("user_id", userId)
+        .maybeSingle()
+      secret = ul?.ms_client_secret ?? ""
+    } else {
+      const { data: m } = await supabase
+        .from("memberships")
+        .select("tenant_id")
+        .eq("user_id", userId)
+        .maybeSingle()
+      if (m?.tenant_id) {
+        const { data: t } = await supabase
+          .from("tenants")
+          .select("ms_client_secret")
+          .eq("id", m.tenant_id)
+          .maybeSingle()
+        secret = t?.ms_client_secret ?? ""
+      }
+    }
+    return {
+      clientId: row[0].client_id,
+      clientSecret: secret,
+      tenantId: row[0].microsoft_tenant_id,
+      authorityHost: row[0].authority_host || "https://login.microsoftonline.com",
+      source: row[0].source as "user" | "tenant",
+    }
+  }
+
+  const envClientId = Deno.env.get("MS_CLIENT_ID")
+  const envClientSecret = Deno.env.get("MS_CLIENT_SECRET")
+  const envTenantId = Deno.env.get("MS_TENANT_ID")
+  if (envClientId && envClientSecret && envTenantId) {
+    return {
+      clientId: envClientId,
+      clientSecret: envClientSecret,
+      tenantId: envTenantId,
+      authorityHost: Deno.env.get("MS_AUTHORITY_HOST") || "https://login.microsoftonline.com",
+      source: "environment",
+    }
+  }
+
+  return null
+}
+
+/**
+ * Token refresh helper — uses refresh_token (if available) + per-user/per-tenant
+ * OAuth credentials to obtain a new access token from Microsoft Entra ID.
  *
- * Falls back gracefully if no refresh_token or tenant credentials exist.
+ * Falls back gracefully if no refresh_token or credentials exist.
  * Returns { access_token, refresh_token?, expires_at? } on success, null on failure.
  */
 async function tryRefreshToken(
@@ -20,34 +89,18 @@ async function tryRefreshToken(
     return null
   }
 
-  // Look up tenant OAuth credentials
-  const { data: membership } = await supabase
-    .from("memberships")
-    .select("tenant_id")
-    .eq("user_id", userId)
-    .maybeSingle()
-
-  if (!membership?.tenant_id) {
-    console.log(`[tryRefreshToken] No tenant for user ${userId}`)
-    return null
-  }
-
-  const { data: tenant } = await supabase
-    .from("tenants")
-    .select("ms_client_id, ms_client_secret, ms_tenant_id")
-    .eq("id", membership.tenant_id)
-    .maybeSingle()
-
-  if (!tenant?.ms_client_id || !tenant?.ms_client_secret || !tenant?.ms_tenant_id) {
-    console.log(`[tryRefreshToken] Tenant missing OAuth credentials (client_id/secret/tenant_id)`)
+  // Resolve OAuth config (per-user -> per-tenant -> env)
+  const oauthConfig = await getOAuthConfig(supabase, userId)
+  if (!oauthConfig) {
+    console.log(`[tryRefreshToken] No OAuth config for user ${userId} (per-user/per-tenant/env all empty)`)
     return null
   }
 
   // Attempt token refresh via Microsoft Entra ID
-  const tokenUrl = `https://login.microsoftonline.com/${tenant.ms_tenant_id}/oauth2/v2.0/token`
+  const tokenUrl = `${oauthConfig.authorityHost}/${oauthConfig.tenantId}/oauth2/v2.0/token`
   const body = new URLSearchParams({
-    client_id: tenant.ms_client_id,
-    client_secret: tenant.ms_client_secret,
+    client_id: oauthConfig.clientId,
+    client_secret: oauthConfig.clientSecret,
     grant_type: "refresh_token",
     refresh_token: currentRefreshToken,
     scope: "https://graph.microsoft.com/.default offline_access",

@@ -10,14 +10,20 @@ const corsHeaders = {
 /**
  * Azure AD App Configuration Edge Function
  *
- * Allows tenant admins to configure their own Azure AD app registration
- * credentials so the OAuth flow works for their specific domain.
+ * Allows tenant admins to configure Azure AD app registration credentials
+ * for either the entire Supabase tenant OR for a specific member whose
+ * Microsoft Entra ID directory differs from the tenant default.
  *
  * Endpoints:
- * - GET  → Returns current Azure AD config for the user's tenant (secrets masked)
- * - PUT  → Saves Azure AD config (client_id, client_secret, tenant_id) to tenants table
+ * - GET  ?target_user_id=<uuid>  → Returns effective config for that user (secrets masked)
+ * - PUT  ?target_user_id=<uuid>  → Saves Azure AD config to either tenants (default) or user_ms_graph_links (when target_user_id is set)
  *
  * Only admins can modify Azure AD config.
+ *
+ * The lookup order is documented in _shared/getOAuthConfig.ts:
+ *   1. per-user row in user_ms_graph_links
+ *   2. per-tenant row in tenants
+ *   3. env vars
  */
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
@@ -45,14 +51,13 @@ Deno.serve(async (req) => {
 
     const userId = user.id
 
-    // Get the user's membership and role
-    const { data: membership, error: membershipError } = await supabase
+    const { data: membership } = await supabase
       .from('memberships')
       .select('tenant_id, role')
       .eq('user_id', userId)
       .maybeSingle()
 
-    if (membershipError || !membership) {
+    if (!membership) {
       return new Response(JSON.stringify({ error: 'No tenant membership found' }), {
         status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       })
@@ -61,10 +66,48 @@ Deno.serve(async (req) => {
     const tenantId = membership.tenant_id
     const isAdmin = membership.role === 'admin'
 
+    // target_user_id selects per-user mode; omit for tenant-wide (back-compat)
+    const url = new URL(req.url)
+    const targetUserId = url.searchParams.get('target_user_id') || null
+
     // ==========================================
     // GET — Return current Azure AD config (secrets masked)
     // ==========================================
     if (req.method === 'GET') {
+      if (targetUserId) {
+        // Per-user lookup via the view
+        const { data: row } = await supabase.rpc('get_effective_azure_config', { p_user_id: targetUserId })
+        const r = row && row[0]
+        const { data: userLink } = await supabase
+          .from('user_ms_graph_links')
+          .select('ms_client_secret')
+          .eq('user_id', targetUserId)
+          .maybeSingle()
+        const { data: tenantRow } = await supabase
+          .from('tenants')
+          .select('ms_client_secret')
+          .eq('id', tenantId)
+          .maybeSingle()
+        const secret = (r?.source === 'user' ? userLink?.ms_client_secret : tenantRow?.ms_client_secret) || null
+
+        return new Response(JSON.stringify({
+          target_user_id: targetUserId,
+          ms_client_id: r?.client_id || null,
+          ms_client_secret_set: !!secret,
+          ms_client_secret_masked: secret
+            ? secret.substring(0, 4) + '****' + secret.substring(secret.length - 4)
+            : null,
+          ms_tenant_id: r?.microsoft_tenant_id || null,
+          ms_authority_host: r?.authority_host || 'https://login.microsoftonline.com',
+          has_config: !!r?.client_id,
+          config_source: r?.source || 'none',
+          is_admin: isAdmin,
+        }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        })
+      }
+
+      // Tenant-wide lookup (back-compat path)
       const { data: tenant, error: tenantError } = await supabase
         .from('tenants')
         .select('ms_client_id, ms_client_secret, ms_tenant_id')
@@ -78,8 +121,6 @@ Deno.serve(async (req) => {
       }
 
       const hasConfig = !!(tenant?.ms_client_id && tenant?.ms_client_secret && tenant?.ms_tenant_id)
-
-      // Check if env vars are set as a fallback
       const hasEnvFallback = !!(
         Deno.env.get('MS_CLIENT_ID') &&
         Deno.env.get('MS_CLIENT_SECRET') &&
@@ -87,7 +128,6 @@ Deno.serve(async (req) => {
       )
 
       return new Response(JSON.stringify({
-        // Tenant-specific config (mask the secret)
         ms_client_id: tenant?.ms_client_id || null,
         ms_client_secret_set: !!tenant?.ms_client_secret,
         ms_client_secret_masked: tenant?.ms_client_secret
@@ -95,11 +135,8 @@ Deno.serve(async (req) => {
           : null,
         ms_tenant_id: tenant?.ms_tenant_id || null,
         has_config: hasConfig,
-        // Env var fallback status
         has_env_fallback: hasEnvFallback,
-        // Config source
         config_source: hasConfig ? 'tenant' : (hasEnvFallback ? 'environment' : 'none'),
-        // Permissions
         is_admin: isAdmin,
       }), {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' }
@@ -119,9 +156,8 @@ Deno.serve(async (req) => {
       }
 
       const body = await req.json()
-      const { ms_client_id, ms_client_secret, ms_tenant_id } = body
+      const { ms_client_id, ms_client_secret, ms_tenant_id, ms_authority_host } = body
 
-      // Validate required fields
       if (!ms_client_id || !ms_client_secret || !ms_tenant_id) {
         return new Response(JSON.stringify({
           error: 'All three fields are required: ms_client_id, ms_client_secret, ms_tenant_id'
@@ -130,7 +166,6 @@ Deno.serve(async (req) => {
         })
       }
 
-      // Basic format validation
       if (!ms_client_id.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i)) {
         return new Response(JSON.stringify({ error: 'Client ID must be a valid GUID format' }), {
           status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
@@ -143,7 +178,34 @@ Deno.serve(async (req) => {
         })
       }
 
-      // Save to tenants table
+      // Per-user save
+      if (targetUserId) {
+        const { data, error } = await supabase.rpc('set_user_azure_config', {
+          p_requesting_user_id: userId,
+          p_target_user_id: targetUserId,
+          p_client_id: ms_client_id,
+          p_client_secret: ms_client_secret,
+          p_microsoft_tenant_id: ms_tenant_id,
+          p_authority_host: ms_authority_host || 'https://login.microsoftonline.com',
+        })
+        if (error) {
+          console.error(`[manage-azure-config] Failed to save per-user config: ${error.message}`)
+          return new Response(JSON.stringify({ error: `Failed to save: ${error.message}` }), {
+            status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+          })
+        }
+        console.log(`[manage-azure-config] Per-user Azure config set for user ${targetUserId} by admin ${userId}`)
+        return new Response(JSON.stringify({
+          success: true,
+          target_user_id: targetUserId,
+          config_source: 'user',
+          message: 'Per-user Azure AD configuration saved. This user will now use their own Azure app registration.',
+        }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        })
+      }
+
+      // Tenant-wide save (back-compat)
       const { error: updateError } = await supabase
         .from('tenants')
         .update({
@@ -154,18 +216,18 @@ Deno.serve(async (req) => {
         .eq('id', tenantId)
 
       if (updateError) {
-        console.error(`[manage-azure-config] Failed to save: ${updateError.message}`)
+        console.error(`[manage-azure-config] Failed to save tenant config: ${updateError.message}`)
         return new Response(JSON.stringify({ error: `Failed to save: ${updateError.message}` }), {
           status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
         })
       }
 
-      console.log(`[manage-azure-config] Azure AD config updated for tenant ${tenantId} by user ${userId}`)
+      console.log(`[manage-azure-config] Tenant Azure AD config updated for tenant ${tenantId} by user ${userId}`)
 
       return new Response(JSON.stringify({
         success: true,
-        message: 'Azure AD configuration saved. Users can now connect their Microsoft accounts using your organization\'s app registration.',
         config_source: 'tenant',
+        message: 'Azure AD configuration saved. Users in your organization will use this app registration (unless they have a per-user override).',
       }), {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       })
