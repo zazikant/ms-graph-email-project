@@ -2398,6 +2398,32 @@ function BatchesTab({ session }: { session: Session }) {
     fetchBatches(1)
   }
 
+  const deleteSingleBatch = async (batchId: string, subject: string) => {
+    if (!tenantId) return
+    const sentCount = (batches.find(b => b.id === batchId)?.sent_count || 0)
+    const confirmMsg = sentCount > 0
+      ? `Delete batch "${subject}"?\n\n${sentCount} email(s) have already been sent. This only removes the batch record and recipient list; it does NOT recall sent emails.\n\nThis cannot be undone.`
+      : `Delete batch "${subject}"? This cannot be undone.`
+    if (!confirm(confirmMsg)) return
+
+    await supabase.from('recipient_list').delete().eq('batch_id', batchId)
+    const { error } = await supabase.from('batches').delete().eq('id', batchId).eq('tenant_id', tenantId)
+    if (error) {
+      console.error('Failed to delete batch:', error)
+      alert(`Failed to delete batch: ${error.message}`)
+      return
+    }
+    // Collapse expanded view if it was open
+    if (expandedId === batchId) {
+      setExpandedId(null)
+      setRecipients(prev => {
+        const { [batchId]: _removed, ...rest } = prev
+        return rest
+      })
+    }
+    fetchBatches(currentPage)
+  }
+
   const fetchRecipients = async (batchId: string) => {
     if (recipients[batchId]) {
       setExpandedId(expandedId === batchId ? null : batchId)
@@ -2476,6 +2502,13 @@ function BatchesTab({ session }: { session: Session }) {
                     <span className={`px-2 py-1 rounded text-xs font-medium ${statusColor(batch.status)}`}>{batch.status}</span>
                     <span className="text-sm">{batch.sent_count || 0}/{batch.total_count || 0} sent</span>
                     {progress < 100 && <span className="text-xs text-gray-400">{progress}%</span>}
+                    <button
+                      onClick={(e) => { e.stopPropagation(); deleteSingleBatch(batch.id, batch.subject) }}
+                      className="ml-2 px-2 py-1 text-xs text-red-600 border border-red-300 rounded hover:bg-red-50"
+                      title="Delete this batch (does not recall already-sent emails)"
+                    >
+                      Delete
+                    </button>
                   </div>
                 </div>
                 {batch.total_count > 0 && (
