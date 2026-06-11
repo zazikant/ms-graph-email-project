@@ -180,6 +180,7 @@ Deno.serve(async (req) => {
     let trackingId = finalCorrId
     let sendId: string | null = null
     const personalizedContent = content.replace(/\{name\}/gi, contactName)
+    const processingStartedAt = new Date().toISOString()
     if (tenantId) {
       const { data: sendRow, error: sendInsertError } = await supabase.from('email_sends').insert({
         tenant_id: tenantId,
@@ -190,9 +191,12 @@ Deno.serve(async (req) => {
         status: 'processing',
         user_id: userId,
         attachments: attachments || [],
+        processing_started_at: processingStartedAt,
       }).select('id').single()
       if (!sendInsertError && sendRow) {
         sendId = sendRow.id
+      } else if (sendInsertError) {
+        console.error('[send-individual] email_sends insert error:', sendInsertError)
       }
     }
 
@@ -224,7 +228,13 @@ Deno.serve(async (req) => {
       if (attachments.length > 0 && actualAttachmentSize > MB_3) {
         const draftResp = await fetch('https://graph.microsoft.com/v1.0/me/messages', {
           method: 'POST',
-          headers: { 'Authorization': 'Bearer ' + accessToken, 'Content-Type': 'application/json' },
+          headers: {
+            'Authorization': 'Bearer ' + accessToken,
+            'Content-Type': 'application/json',
+            // Trace correlation: lets us grep Graph-side logs by tracking_id.
+            // NOT a dedup key (Graph has no Idempotency-Key support).
+            'client-request-id': trackingId,
+          },
           body: JSON.stringify({
             subject,
             toRecipients: [{ emailAddress: { address: recipient } }],
@@ -246,7 +256,11 @@ Deno.serve(async (req) => {
         for (const file of downloadedFiles) {
           const sessionResp = await fetch('https://graph.microsoft.com/v1.0/me/messages/' + messageId + '/attachments/createUploadSession', {
             method: 'POST',
-            headers: { 'Authorization': 'Bearer ' + accessToken, 'Content-Type': 'application/json' },
+            headers: {
+              'Authorization': 'Bearer ' + accessToken,
+              'Content-Type': 'application/json',
+              'client-request-id': trackingId,
+            },
             body: JSON.stringify({ AttachmentItem: { attachmentType: 'file', name: file.name, size: file.size } })
           })
           const session = await sessionResp.json()
@@ -267,7 +281,7 @@ Deno.serve(async (req) => {
 
         const sendResp = await fetch('https://graph.microsoft.com/v1.0/me/messages/' + messageId + '/send', {
           method: 'POST',
-          headers: { 'Authorization': 'Bearer ' + accessToken }
+          headers: { 'Authorization': 'Bearer ' + accessToken, 'client-request-id': trackingId }
         })
         if (!sendResp.ok) throw new Error('Failed to send message after upload.')
         emailStatus = 'sent'
@@ -289,9 +303,13 @@ Deno.serve(async (req) => {
           saveToSentItems: 'true'
         }
 
-        const resp = await fetch('https://graph.microsoft.com/v1.0/sendMail', {
+        const resp = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
           method: 'POST',
-          headers: { 'Authorization': 'Bearer ' + accessToken, 'Content-Type': 'application/json' },
+          headers: {
+            'Authorization': 'Bearer ' + accessToken,
+            'Content-Type': 'application/json',
+            'client-request-id': trackingId,
+          },
           body: JSON.stringify(payload)
         })
 
@@ -380,8 +398,24 @@ Deno.serve(async (req) => {
 
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error'
+    console.error(`[send-individual] function crash: ${message}`)
     return new Response(JSON.stringify({ error: message }), {
       status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     })
+  } finally {
+    // ─── Terminal-state guarantee ─────────────────────────────────────────
+    // Covers ALL exit paths (return, throw, early-return on 401/429/etc.).
+    // Without this, the row can stay in 'processing' forever — see SOP
+    // agent/sops/supabase-insert-silent-failure.md. The auto-resume sweeper
+    // (added in 20260611110100) only picks up rows older than 10 min, so this
+    // is the line of defense for the fast-path.
+    if (sendId) {
+      const { error: finalizeErr } = await supabase
+        .from('email_sends')
+        .update({ status: 'failed', failure_reason: 'abandoned by edge function (no terminal status recorded)' })
+        .eq('id', sendId)
+        .eq('status', 'processing')
+      if (finalizeErr) console.error('[send-individual] finalize error:', finalizeErr)
+    }
   }
 })

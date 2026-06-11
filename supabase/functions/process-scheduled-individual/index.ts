@@ -89,6 +89,27 @@ Deno.serve(async (req) => {
       for (const email of userEmails) {
         if (Date.now() - startTime > MAX_RUNTIME_MS) break
 
+        // ─── Retry cap (see email_sends_stats view) ─────────────────────────
+        // The auto-resume sweeper (migration 20260611110100) increments
+        // retry_count every time it resurrects a zombie. After 3 attempts we
+        // give up and mark failed so the user can see the broken email in
+        // History and re-send manually if needed.
+        const MAX_RETRIES = 3
+        if ((email.retry_count ?? 0) >= MAX_RETRIES) {
+          console.log(`[process-scheduled-individual] email ${email.id} exceeded retry cap (${email.retry_count}) — marking failed`)
+          await supabase
+            .from("email_sends")
+            .update({ status: "failed", failure_reason: `max retries exceeded (${MAX_RETRIES})` })
+            .eq("id", email.id)
+          results.push({
+            send_id: email.id,
+            recipient: email.recipient_email,
+            status: "failed",
+            error: `max retries exceeded (${MAX_RETRIES})`,
+          })
+          continue
+        }
+
         let emailStatus: "sent" | "failed" = "failed"
         let errorDetail: string | null = null
 
@@ -140,6 +161,7 @@ Deno.serve(async (req) => {
               headers: {
                 Authorization: "Bearer " + accessToken,
                 "Content-Type": "application/json",
+                "client-request-id": email.tracking_id,
               },
               body: JSON.stringify({
                 subject: email.subject,
@@ -174,6 +196,7 @@ Deno.serve(async (req) => {
                     headers: {
                       Authorization: "Bearer " + accessToken,
                       "Content-Type": "application/json",
+                      "client-request-id": email.tracking_id,
                     },
                     body: JSON.stringify({
                       AttachmentItem: { attachmentType: "file", name: file.name, size: file.size },
@@ -200,7 +223,7 @@ Deno.serve(async (req) => {
               }
               const sendResp = await fetch(
                 "https://graph.microsoft.com/v1.0/me/messages/" + messageId + "/send",
-                { method: "POST", headers: { Authorization: "Bearer " + accessToken } }
+                { method: "POST", headers: { Authorization: "Bearer " + accessToken, "client-request-id": email.tracking_id } }
               )
               if (!sendResp.ok) throw new Error("Failed to send message after upload")
               emailStatus = "sent"
@@ -228,6 +251,7 @@ Deno.serve(async (req) => {
               headers: {
                 Authorization: "Bearer " + accessToken,
                 "Content-Type": "application/json",
+                "client-request-id": email.tracking_id,
               },
               body: JSON.stringify(payload),
             })
