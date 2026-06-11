@@ -2485,7 +2485,10 @@ function BatchesTab({ session }: { session: Session }) {
         <>
           <div className="space-y-3">
           {batches.map(batch => {
-            const progress = batch.total_count > 0 ? Math.round(((batch.sent_count || 0) + (batch.failed_count || 0)) / batch.total_count * 100) : 0
+            const sent = batch.sent_count || 0
+            const failed = batch.failed_count || 0
+            const total = batch.total_count || 0
+            const progress = total > 0 ? Math.round((sent + failed) / total * 100) : 0
             return (
               <div key={batch.id} className="border rounded p-3">
                 <div className="flex justify-between items-center cursor-pointer" onClick={() => fetchRecipients(batch.id)}>
@@ -2500,8 +2503,8 @@ function BatchesTab({ session }: { session: Session }) {
                   </div>
                   <div className="flex items-center gap-3">
                     <span className={`px-2 py-1 rounded text-xs font-medium ${statusColor(batch.status)}`}>{batch.status}</span>
-                    <span className="text-sm">{batch.sent_count || 0}/{batch.total_count || 0} sent</span>
-                    {progress < 100 && <span className="text-xs text-gray-400">{progress}%</span>}
+                    <span className="text-sm">{total > 0 ? `${sent}/${total} sent` : `${sent} sent`}</span>
+                    {progress < 100 && total > 0 && <span className="text-xs text-gray-400">{progress}%</span>}
                     <button
                       onClick={(e) => { e.stopPropagation(); deleteSingleBatch(batch.id, batch.subject) }}
                       className="ml-2 px-2 py-1 text-xs text-red-600 border border-red-300 rounded hover:bg-red-50"
