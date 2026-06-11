@@ -2,50 +2,47 @@
 
 ## Date: 2026-06-11
 
-## Task: Fix Microsoft Graph token auto-refresh in user-initiated edge functions
+## Task 2: Auto-resume stuck 'processing' `email_sends` rows (mirrors `process-batches` self-heal)
 
-## Problem
-User `business@gem-engserv.net` reported 403 `token_expired` on Compose → "Send to List" → "test" list. Settings UI promised "Auto-refresh is active" but only the cron path (process-batches) actually refreshed. The two user-initiated entry points — `send-individual` and `schedule-batch` — returned 403 immediately without attempting to use the stored `refresh_token`.
+### Problem
+Two `email_sends` rows stuck in `status='processing'` (ages 27 min and 4 h 43 min) with `failure_reason=NULL`. No cron picks them up — only manual delete from the History tab. `process-scheduled-individual` only handles `status='scheduled'`.
 
-## Root Cause
+### Root Cause
+`send-individual` inserts the row with `status='processing'` BEFORE attempting the Graph call. If the function crashes between insert and update (timeout, network blip, silent DB error per `agent/sops/supabase-insert-silent-failure.md`), the row stays stuck forever.
 
-`tryRefreshToken` was inlined only in `process-batches/index.ts` (L81–161) and a near-duplicate in `detect-bounces/index.ts` (L61–121). It was never called from `send-individual` or `schedule-batch`. The Settings UI copy at App.tsx L2750–2766 was written assuming all paths refresh.
-
-## Fix Applied (4 files)
+### Fix Applied (2 migrations + 2 edge function rewrites)
 
 | File | Change |
 |---|---|
-| `supabase/functions/_shared/tryRefreshToken.ts` | **NEW** — extracted helper with atomic claim + `RefreshResult` discriminated union |
-| `supabase/functions/send-individual/index.ts` | Imports helper, replaces bare 403 with refresh attempt → 409 on `lock_lost` → 403 only on `invalid_grant` |
-| `supabase/functions/schedule-batch/index.ts` | Same pattern, inserted BEFORE `INSERT INTO batches` so failed refresh doesn't orphan a row |
-| `src/App.tsx` | "next batch run" → "on next send" in `statusText()` |
+| `supabase/migrations/20260611110000_add_email_sends_resume_columns.sql` | **NEW** — `retry_count int default 0`, `last_error text`, `processing_started_at timestamptz`; 2 partial indexes; backfill for existing 2 zombies |
+| `supabase/migrations/20260611110100_add_email_sends_resume_cron.sql` | **NEW** — `auto_resume_email_sends()` SECURITY DEFINER (FOR UPDATE SKIP LOCKED, 10 min threshold, 3-retry cap, skip rate-limited users); `cron.schedule('*/5 * * * *')`; `email_sends_stats` view |
+| `supabase/functions/send-individual/index.ts` | Set `processing_started_at` on INSERT; add `client-request-id: <tracking_id>` header on all 4 Graph calls; wrap function in `try/catch/finally` that ALWAYS marks row `failed` if no terminal status was recorded |
+| `supabase/functions/process-scheduled-individual/index.ts` | Add 3-retry cap check (skips rows with `retry_count >= 3`); add `client-request-id` to all 4 Graph calls |
 
-## Research Artifacts Produced
+### Research Artifacts Produced
 
-- `agent/research/token-refresh-gap-summary.md` (confidence 9/10)
-- `agent/research/token-refresh-gap-sources.md` (11 citations, avg 9.6/10)
-- `agent/research/token-refresh-gap-examples.md` (7 verified code patterns, confidence 9/10)
-- Deep-think KG: 23 nodes, 21 edges, validation score 0.78
+- `agent/research/individual-send-resume-seed.md` (script-generated seed)
+- `agent/research/individual-send-resume-summary.md` (web-verified deep research, 9/10 confidence)
+- `agent/research/individual-send-resume-sources.md` (11+ citations)
+- `agent/research/individual-send-resume-examples.md` (7 verified code patterns, 8-10/10)
+- Deep-think KG: 33 nodes, 42 edges, validation score 0.78
+- PRD: `agent/task/Email_Send_Auto_Resume_PRD.md`
 
-## Key Design Decisions
+### Key Design Decisions
 
-1. **Atomic claim via `UPDATE … WHERE status='token_expired'`** — prevents rotating-refresh-token race when two edge functions refresh simultaneously.
-2. **HTTP 409 `refresh_in_progress`** for race-loss (not 403) — signals retryability.
-3. **Eager refresh in `schedule-batch`** (not lazy) — avoids orphan `pending` batches; cron self-heal was already correct.
-4. **No `process-scheduled-individual` change** — its mark-and-skip is already correct; cron migration `20260609000001` backfills stuck-failed batches.
+1. **Reuse `status='scheduled'`** (don't introduce a new state) — leverages existing `process-scheduled-individual` worker, no new code path.
+2. **Set `send_at = now()`** when reaping zombie — so the existing `WHERE send_at <= now()` filter picks it up on the next 1-min cron tick.
+3. **FOR UPDATE SKIP LOCKED** in the sweeper — atomic claim prevents two concurrent runs from double-resetting the same row.
+4. **3-retry cap** enforced by the worker (not the sweeper) — sweeper just sets a count, worker decides when to give up.
+5. **`client-request-id: <email_sends.tracking_id>`** on every Graph call — Microsoft Graph does NOT support `Idempotency-Key`; this header is for server-side tracing only.
+6. **`try/finally` in `send-individual`** guarantees no row can ever stay in 'processing' (closes the silent-failure SOP gap).
 
-## Database Changes
+### Database Changes (applied to Supabase)
 
-None. Uses existing `status`, `processing_since`, `refresh_token`, `expires_at`, `updated_at` columns.
-
-## Documentation Updated
-
-- `agent/task/Token_Auto_Refresh_Fix_PRD.md` (NEW)
-- `agent/sops/mistake-2026-06-11-token-refresh-gap.md` (NEW)
-- `agent/sops/credential-expiry-reminder.md` (NEW)
-- `agent/readme.md` (updated by task-planner subagent)
-
-## Status: ✅ DEPLOYED + VERIFIED IN PRODUCTION
+```
+Migration A applied (idempotent): 3 columns + 2 indexes + backfill
+Migration B applied (idempotent): sweeper function + cron schedule + stats view
+```
 
 ### Deployment Log
 
@@ -56,39 +53,61 @@ Uploading asset (send-individual): supabase/functions/_shared/tryRefreshToken.ts
 Uploading asset (send-individual): supabase/functions/_shared/getOAuthConfig.ts
 Deployed Functions on project dsrsctzumggkrmyuwodw: send-individual
 
-$ npx supabase functions deploy schedule-batch
-Uploading asset (schedule-batch): supabase/functions/schedule-batch/index.ts
-Uploading asset (schedule-batch): supabase/functions/_shared/tryRefreshToken.ts
-Uploading asset (schedule-batch): supabase/functions/_shared/getOAuthConfig.ts
-Deployed Functions on project dsrsctzumggkrmyuwodw: schedule-batch
+$ npx supabase functions deploy process-scheduled-individual
+Uploading asset (process-scheduled-individual): supabase/functions/process-scheduled-individual/index.ts
+Deployed Functions on project dsrsctzumggkrmyuwodw: process-scheduled-individual
 ```
 
-### Live Test (business@gem-engserv.net → "test" list, post-fix)
+### Live Verification
 
-1. Logged in via Chrome DevTools MCP
-2. Settings tab confirmed pre-fix state: `status: token_expired`, has_refresh_token=true
-3. Compose tab → "Send to List" → "test" → Send
-4. Edge function response: **HTTP 200** (was 403)
-   - `POST | 200 | https://dsrsctzumggkrmyuwodw.supabase.co/functions/v1/schedule-batch`
-   - execution_time_ms: 2905 (includes refresh round-trip to Microsoft)
-   - version: 16 (post-fix)
-5. UI status: **"Batch queued! Processing will begin shortly."** (green)
-6. DB state — `user_ms_graph_links` for `cb998a47-b536-40f7-81bd-f4ee21955fed`:
-   - `status`: `active` ✅ (was `token_expired`)
-   - `expires_at`: `2026-06-11 05:47:43.575+00` ✅ (fresh, ~55 min ahead)
-   - `processing_since`: `null` ✅
-   - `azure_config_source`: `user_set` (3-tier lookup picks per-user row first)
-7. Batch record created: `f3cfa51b-5535-4b35-b090-158a51f3ae09`
-8. `recipient_list` populated with 2 entries (matching the 2 contacts in "test" list):
-   - `shashikant.zarekar@gemengserv.com` (status: pending)
-   - `zazikant@gmail.com` (status: pending)
-9. Will be processed by `process-batches` cron (`*/5 * * * *`) within 5 minutes
+1. Sweeper manually triggered: `SELECT public.auto_resume_email_sends();` → returned `reset_count = 2`
+2. Both zombies updated: `status='scheduled'`, `retry_count=1`, `last_error='abandoned by edge function'`, `send_at=now()`
+3. `process-scheduled-individual` cron (`* * * * *`) picked up the first row ~1 min later and sent it
+4. Chrome (local Vite http://localhost:5173/) — History tab shows the "dsf" email now with `status='sent'` (11:41:53 IST)
+5. Settings tab on shashikant's account: `Status: Active (sends today: 1) | expires: 10:50:44 AM (no auto-refresh - will expire)` — `sends today: 1` confirms the re-sent email
 
-### Edge Function Log Evidence (before vs after)
+### Stats View Sample (post-fix)
 
-| Time | Function | Status | Version | Notes |
-|---|---|---|---|---|
-| 2026-06-11 04:23:32 | schedule-batch | **403** | 15 | Pre-fix (before fix deployed) |
-| 2026-06-11 04:46:53 | schedule-batch | **200** | 16 | Post-fix (after deployment) |
+```sql
+SELECT * FROM public.email_sends_stats;
+```
 
-## Status: ✅ PRODUCTION VERIFIED — BATCH SENT, EMAILS WILL ARRIVE WITHIN 5 MIN
+| status | row_count | stuck_over_10min | retried_at_least_once | failed_after_cap |
+|---|---:|---:|---:|---:|
+| processing | 2 | 2 | 0 | 0 |
+| sent | 4 | 0 | 0 | 0 |
+
+(after manual sweeper trigger → 0 processing; before next cron run, this would be 2)
+
+## Status: ✅ DEPLOYED + VERIFIED IN PRODUCTION
+
+---
+
+## Task 1 (earlier in same session): Fix Microsoft Graph token auto-refresh in user-initiated edge functions
+
+### Problem
+User `business@gem-engserv.net` reported 403 `token_expired` on Compose → "Send to List" → "test" list. Settings UI promised "Auto-refresh is active" but only the cron path (process-batches) actually refreshed.
+
+### Fix Applied (4 files)
+
+| File | Change |
+|---|---|
+| `supabase/functions/_shared/tryRefreshToken.ts` | **NEW** — extracted helper with atomic claim + `RefreshResult` discriminated union |
+| `supabase/functions/send-individual/index.ts` | Refresh on `token_expired` → 409 on `lock_lost` → 403 only on `invalid_grant` |
+| `supabase/functions/schedule-batch/index.ts` | Same pattern, before `INSERT INTO batches` |
+| `src/App.tsx` | "next batch run" → "on next send" in `statusText()` |
+
+### Research Artifacts
+
+- `agent/research/token-refresh-gap-{summary,sources,examples}.md` (confidence 9/10)
+- Deep-think KG: 23 nodes, 21 edges, score 0.78
+- PRD: `agent/task/Token_Auto_Refresh_Fix_PRD.md`
+- SOP: `agent/sops/mistake-2026-06-11-token-refresh-gap.md`
+
+### Live Verification
+
+`POST | 200 | schedule-batch` (v16) — 2905 ms (includes Microsoft refresh round-trip)
+`user_ms_graph_links.status` flipped from `token_expired` → `active` for `cb998a47-…`
+Batch `f3cfa51b-…` created with 2 recipient_list entries.
+
+## Status: ✅ PRODUCTION VERIFIED
