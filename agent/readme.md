@@ -14,6 +14,12 @@ This folder contains AI agent working files for the ms-graph-email-project.
 └── task/           # Task plans — PRDs, implementation plans
 ```
 
+## Task PRDs
+
+- [Batch Processing PRD](task/Batch_Processing_PRD.md) — pg_cron-driven batch send pipeline (`process-batches` + `schedule-batch`).
+- [Individual Processing PRD](task/Individual_Processing_PRD.md) — synchronous single-mail send (`send-individual`) + scheduled individual cron.
+- [Token Auto-Refresh Fix PRD](task/Token_Auto_Refresh_Fix_PRD.md) — extract `tryRefreshToken` to `_shared/` and wire into `send-individual` + `schedule-batch` to fix 403 `token_expired` bug.
+
 ## Purpose
 
 - **research/** — Deep research findings with verified sources and code examples
