@@ -1,3 +1,29 @@
+# Send Mail via API
+
+Step 1 — Get your Supabase JWT (by logging in):
+
+POST https://<your-supabase-url>/auth/v1/token?grant_type=password
+Content-Type: application/json
+apikey: <your-supabase-anon-key>
+
+{ "email": "your@email.com", "password": "yourpassword" }
+
+Step 2 — Send the email:
+
+
+POST https://<your-supabase-url>/functions/v1/send-individual
+Authorization: Bearer <jwt-from-step-1>
+Content-Type: application/json
+
+{
+  "recipient": "target@example.com",
+  "subject": "Hello from Graph",
+  "content": "<html><body><p>Hi there!</p></body></html>",
+  "correlation_id": "any-uuid-for-tracking"
+}
+
+====
+
 # Interesting Aspect
 
 Smart Batch Processing - For the method only deploying mails using token that is not via Azure AD. When token gets expired, the batch stops sending emails and gets in "pending" mode. But, As the token is pasted.. The mails are resumed "processing" in about 5-10 minutes. 
