@@ -1,6 +1,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts"
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.0"
 import { encodeBase64 } from "jsr:@std/encoding/base64"
+import { tryRefreshToken } from "../_shared/tryRefreshToken.ts"
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -60,9 +61,39 @@ Deno.serve(async (req) => {
     }
 
     if (statusRow.status === 'token_expired') {
-      return new Response(JSON.stringify({ error: 'Microsoft Graph token has expired. Please update your access token in Settings.', code: 'token_expired' }), {
-        status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-      })
+      // Auto-refresh the token before rejecting. Only 403 if refresh is truly impossible.
+      const { data: linkDataForRefresh } = await supabase
+        .from('user_ms_graph_links')
+        .select('refresh_token')
+        .eq('user_id', userId)
+        .maybeSingle()
+
+      const refreshResult = await tryRefreshToken(
+        supabase,
+        userId,
+        linkDataForRefresh?.refresh_token ?? null
+      )
+      if (!refreshResult.ok) {
+        if (refreshResult.reason === 'lock_lost') {
+          return new Response(JSON.stringify({
+            error: 'Token refresh in progress, please retry in a few seconds.',
+            code: 'refresh_in_progress',
+          }), {
+            status: 409, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+          })
+        }
+        console.log(`[send-individual] refresh failed for user ${userId}: ${refreshResult.reason}`)
+        return new Response(JSON.stringify({
+          error: 'Microsoft Graph token has expired. Please re-authorize in Settings.',
+          code: 'token_expired',
+          reason: refreshResult.reason,
+        }), {
+          status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        })
+      }
+      console.log(`[send-individual] auto-refresh succeeded for user ${userId}, new expires_at=${refreshResult.expires_at}`)
+      // Refresh succeeded — fall through to the normal send path. The next
+      // get_ms_graph_access_token call (line ~140) will pick up the new token.
     }
 
     // 2. Check rate limit (Retry-After)
@@ -258,7 +289,7 @@ Deno.serve(async (req) => {
           saveToSentItems: 'true'
         }
 
-        const resp = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
+        const resp = await fetch('https://graph.microsoft.com/v1.0/sendMail', {
           method: 'POST',
           headers: { 'Authorization': 'Bearer ' + accessToken, 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)

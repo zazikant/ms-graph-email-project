@@ -1,5 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts"
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.0"
+import { tryRefreshToken } from "../_shared/tryRefreshToken.ts"
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -51,7 +52,7 @@ Deno.serve(async (req) => {
 
     const { data: linkData, error: linkError } = await supabase
       .from('user_ms_graph_links')
-      .select('status, expires_at')
+      .select('status, expires_at, refresh_token')
       .eq('user_id', userId)
       .maybeSingle()
 
@@ -62,9 +63,34 @@ Deno.serve(async (req) => {
     }
 
     if (linkData.status === 'token_expired') {
-      return new Response(JSON.stringify({ error: 'Microsoft Graph token has expired. Please update your access token in Settings.', code: 'token_expired' }), {
-        status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-      })
+      // Auto-refresh before rejecting. Avoids creating an orphan batch record.
+      const refreshResult = await tryRefreshToken(
+        supabase,
+        userId,
+        linkData.refresh_token ?? null
+      )
+      if (!refreshResult.ok) {
+        if (refreshResult.reason === 'lock_lost') {
+          return new Response(JSON.stringify({
+            error: 'Token refresh in progress, please retry.',
+            code: 'refresh_in_progress',
+          }), {
+            status: 409, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+          })
+        }
+        console.log(`[schedule-batch] refresh failed for user ${userId}: ${refreshResult.reason}`)
+        // Do NOT create the batch record — it would be orphaned.
+        return new Response(JSON.stringify({
+          error: 'Microsoft Graph token has expired. Please re-authorize in Settings.',
+          code: 'token_expired',
+          reason: refreshResult.reason,
+        }), {
+          status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        })
+      }
+      console.log(`[schedule-batch] auto-refresh succeeded for user ${userId}, new expires_at=${refreshResult.expires_at}`)
+      // Refresh succeeded — fall through. The schedule_batch RPC will
+      // re-read the (now active) token via the auth/permissions context.
     }
 
     const parsedScheduledAt = scheduled_at ? new Date(scheduled_at) : null
