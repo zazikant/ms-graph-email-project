@@ -2751,7 +2751,7 @@ function SettingsTab({ session }: { session: Session }) {
     if (!tokenStatus || !tokenStatus.has_token) return 'No token configured'
     if (tokenStatus.status === 'token_expired') {
       return tokenStatus.has_refresh_token
-        ? 'Token expired - will auto-refresh on next batch run'
+        ? 'Token expired - will auto-refresh on next send'
         : 'Token expired - please reconnect or paste a new access token'
     }
     if (tokenStatus.retry_after && new Date(tokenStatus.retry_after) > new Date()) {
