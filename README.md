@@ -24,6 +24,72 @@ Content-Type: application/json
 
 ====
 
+# Send Mail directly or scheduled way to Batch via API
+
+Here are the exact steps to send a batch to an existing list:
+
+Step 1 — Get your Supabase JWT (same as before)
+POST https://<your-supabase-url>/auth/v1/token?grant_type=password
+Content-Type: application/json
+apikey: <your-supabase-anon-key>
+{ "email": "your@email.com", "password": "yourpassword" }
+
+→ Save the access_token from the response
+
+Step 2 — Find your List ID
+Your lists live in the lists table. Query them via the Supabase REST API:
+
+GET https://<your-supabase-url>/rest/v1/lists?select=id,name
+Authorization: Bearer <jwt-from-step-1>
+apikey: <your-supabase-anon-key>
+
+Response will look like:
+
+[
+  { "id": "abc123-...", "name": "My Contact List" },
+  { "id": "def456-...", "name": "Newsletter Subscribers" }
+]
+
+→ Copy the id of the list you want to send to
+
+Step 3 — Schedule the Batch
+POST https://<your-supabase-url>/functions/v1/schedule-batch
+Authorization: Bearer <jwt-from-step-1>
+Content-Type: application/json
+{
+  "list_id": "<id-from-step-2>",
+  "subject": "Your email subject",
+  "content": "<html><body><p>Your message here</p></body></html>"
+}
+
+Response:
+
+{
+  "success": true,
+  "batch_id": "some-uuid",
+  "total_count": 42,
+  "status": "pending",
+  "message": "Batch queued! Processing will begin shortly."
+}
+
+The batch will be picked up automatically by the cron job within 5 minutes and emails will start sending.
+
+Optional: Schedule for a future time
+Add scheduled_at to Step 3 to send later instead of immediately:
+
+{
+  "list_id": "<id-from-step-2>",
+  "subject": "Your email subject",
+  "content": "<html><body><p>Your message</p></body></html>",
+  "scheduled_at": "2026-06-12T09:00:00Z"
+}
+
+The status will come back as "scheduled" and the cron will only pick it up at that time.
+
+Key difference from individual send: instead of a recipient address, you pass a list_id — the system reads all subscribed contacts in that list and queues them all.
+
+=======================
+
 # Interesting Aspect
 
 Smart Batch Processing - For the method only deploying mails using token that is not via Azure AD. When token gets expired, the batch stops sending emails and gets in "pending" mode. But, As the token is pasted.. The mails are resumed "processing" in about 5-10 minutes. 
