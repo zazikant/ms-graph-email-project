@@ -6,12 +6,12 @@
 --   1. Atomically claims stuck rows (FOR UPDATE SKIP LOCKED) so two concurrent
 --      runs cannot double-reset the same row.
 --   2. Skips users whose user_ms_graph_links.retry_after is in the future
---      (rate-limited -- same courtesy as process-batches).
+--      (rate-limited — same courtesy as process-batches).
 --   3. Increments retry_count and stamps last_error / send_at = now().
 --   4. Returns the count of rows reset (for monitoring + edge fn logs).
 --
 -- A 3-retry cap is enforced by process-scheduled-individual (the next consumer
--- in the pipeline). The sweeper itself does not enforce the cap -- it just resets
+-- in the pipeline). The sweeper itself does not enforce the cap — it just resets
 -- the row to status='scheduled' so the existing worker will pick it up.
 -- The cap check lives in the worker because that is where the actual send attempt
 -- happens and where the per-attempt failure_reason is known.
@@ -41,7 +41,7 @@ BEGIN
        AND es.processing_started_at < now() - interval '10 minutes'
        -- Skip users who are rate-limited (their retry_after is in the future)
        AND (l.retry_after IS NULL OR l.retry_after <= now())
-       -- Only reset rows that are under the retry cap (defence-in-depth -- the
+       -- Only reset rows that are under the retry cap (defence-in-depth — the
        -- worker enforces the cap authoritatively, but this avoids pointless
        -- resets that the worker will immediately mark failed anyway)
        AND es.retry_count < v_max_retries
@@ -75,7 +75,7 @@ GRANT EXECUTE ON FUNCTION public.auto_resume_email_sends TO service_role;
 -- Same cadence as process-batches (*/5). Skipped: existing crons (clean-up
 -- old files, hardbounced-check, reset-daily-send-counts, reset-stuck-
 -- processing-locks, process-email-batches-v2, process-scheduled-individual,
--- daily_keepalive) -- none of them overlap with this sweeper's responsibility.
+-- daily_keepalive) — none of them overlap with this sweeper's responsibility.
 SELECT cron.schedule(
   'auto-resume-email-sends',
   '*/5 * * * *',

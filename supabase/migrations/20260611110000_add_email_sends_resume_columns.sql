@@ -3,9 +3,9 @@
 -- to detect and recover rows stuck in status='processing'.
 --
 -- Three new columns:
---   retry_count            -- incremented on every sweep; capped at 3 by the sweeper
---   last_error             -- last recorded reason (e.g. 'abandoned by edge function')
---   processing_started_at  -- set when send-individual inserts the row; the sweeper
+--   retry_count            — incremented on every sweep; capped at 3 by the sweeper
+--   last_error             — last recorded reason (e.g. 'abandoned by edge function')
+--   processing_started_at  — set when send-individual inserts the row; the sweeper
 --                            uses (now() - processing_started_at) > interval '10 minutes'
 --                            to decide if a row is genuinely abandoned.
 --

@@ -403,6 +403,25 @@ Deno.serve(async (req) => {
         }
         if (tokenExpired || rateLimited) break
 
+        // ─── Retry cap (mirrors process-scheduled-individual L97) ──────────
+        // The auto-resume-batches sweeper (migration 20260611120100)
+        // increments retry_count every time it resurrects a stuck 'processing'
+        // batch. After 3 attempts we give up and mark 'failed' so the user
+        // can see the broken batch in the Batches tab and re-send manually.
+        const MAX_BATCH_RETRIES = 3
+        if ((batch.retry_count ?? 0) >= MAX_BATCH_RETRIES) {
+          console.log(`[process-batches] batch ${batch.batch_id} exceeded retry cap (${batch.retry_count}) — marking failed`)
+          await supabase
+            .from("batches")
+            .update({
+              status: "failed",
+              last_error: `max retries exceeded (${MAX_BATCH_RETRIES})`,
+              completed_at: new Date().toISOString(),
+            })
+            .eq("id", batch.batch_id)
+          continue
+        }
+
         await supabase
           .from("batches")
           .update({ status: "processing", started_at: new Date().toISOString() })
