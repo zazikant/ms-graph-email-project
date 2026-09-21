@@ -15,6 +15,7 @@ All cron jobs are managed in Supabase Dashboard → Database → pg_cron.
 | `reset-stuck-processing-locks` | `*/30 * * * *` | Raw SQL UPDATE | Every 30 mins — clears stale `processing` locks older than 2hrs |
 | `process-email-batches-v2` | `*/5 * * * *` | `net.http_post` → `process-batches` | **Every 5 mins** — picks up pending/scheduled batches |
 | `process-scheduled-individual` | `* * * * *` | `net.http_post` → `process-scheduled-individual` | **Every 1 min** — picks up scheduled single emails |
+| `cleanup-cron-run-details` | `0 3 * * *` | Raw SQL `DELETE` | Daily at 03:00 UTC — purges `cron.job_run_details` rows older than 2 days. pg_cron writes one row per execution regardless of outcome; without retention this table grows unbounded (~2,500 rows/day with current 9 jobs). Nothing in the app reads this table — pure audit log. |
 
 ---
 
