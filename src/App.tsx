@@ -1626,51 +1626,81 @@ function HistoryTab({ session }: { session: Session }) {
   }
 
   const deleteRecords = async () => {
-    const dataToDelete = hasFilters ? filteredSends : sends
-    if (dataToDelete.length === 0 || !tenantId) return
+    if (!tenantId) return
+
+    let sendIds: string[] = []
+
+    if (hasFilters) {
+      // Filtered delete: delete only the currently-loaded filtered records.
+      // (filteredSends is derived from the 200-record slice loaded into UI state)
+      sendIds = filteredSends.map(s => s.id)
+    } else {
+      // "Delete All" — fetch ALL send IDs for the tenant, not just the 200
+      // loaded in UI state. Without this, older records beyond the 200-record
+      // .limit(200) at line 1454 would survive and reappear on next refresh.
+      const { data: allSends, error: fetchErr } = await supabase
+        .from('email_sends')
+        .select('id')
+        .eq('tenant_id', tenantId)
+      if (fetchErr) {
+        alert(`Failed to fetch records: ${fetchErr.message}`)
+        return
+      }
+      sendIds = (allSends || []).map(s => s.id)
+    }
+
+    if (sendIds.length === 0) {
+      alert('No records to delete.')
+      return
+    }
 
     const confirmMsg = hasFilters
-      ? `Delete ${dataToDelete.length} filtered records? This cannot be undone.`
-      : `Delete ALL ${dataToDelete.length} history records? This cannot be undone.`
+      ? `Delete ${sendIds.length} filtered records? This cannot be undone.`
+      : `Delete ALL ${sendIds.length} history records? This cannot be undone.`
 
     if (!confirm(confirmMsg)) return
 
-    const sendIds = dataToDelete.map(s => s.id)
+    // PostgREST has URL length limits on .in() filters (~300 UUIDs max).
+    // Chunk to 200 at a time to stay safely under.
+    const CHUNK = 200
 
-    // Fetch attachment storage_paths BEFORE deleting the rows, so we can also
-    // delete the actual file bytes from the storage bucket. Without this,
-    // bulk delete leaves orphan files in storage.
-    const { data: attRows } = await supabase
-      .from('send_attachments')
-      .select('storage_path')
-      .in('send_id', sendIds)
-    const pathsToRemove = (attRows || []).map(r => r.storage_path).filter(Boolean)
-
-    const deleteEvents = await supabase.from('email_events').delete().in('send_id', sendIds)
-    const deleteAttachments = await supabase.from('send_attachments').delete().in('send_id', sendIds)
-    const deleteSends = await supabase.from('email_sends').delete().in('id', sendIds).eq('tenant_id', tenantId)
-
-    if (deleteEvents.error) {
-      console.error('Failed to delete events:', deleteEvents.error)
-      alert(`Failed to delete events: ${deleteEvents.error.message}`)
-      return
-    }
-    if (deleteAttachments.error) {
-      console.error('Failed to delete attachments:', deleteAttachments.error)
-      alert(`Failed to delete attachments: ${deleteAttachments.error.message}`)
-      return
-    }
-    if (deleteSends.error) {
-      console.error('Failed to delete sends:', deleteSends.error)
-      alert(`Failed to delete sends: ${deleteSends.error.message}`)
-      return
+    // Fetch attachment storage_paths BEFORE deleting the rows (chunked).
+    const pathsToRemove: string[] = []
+    for (let i = 0; i < sendIds.length; i += CHUNK) {
+      const chunk = sendIds.slice(i, i + CHUNK)
+      const { data: attRows } = await supabase
+        .from('send_attachments')
+        .select('storage_path')
+        .in('send_id', chunk)
+      if (attRows) pathsToRemove.push(...attRows.map(r => r.storage_path).filter(Boolean))
     }
 
-    // Best-effort storage cleanup after successful row deletion.
+    // Delete rows in chunks. If any chunk fails, stop and surface the error.
+    let firstError: { stage: string, err: { message: string } } | null = null
+    for (let i = 0; i < sendIds.length && !firstError; i += CHUNK) {
+      const chunk = sendIds.slice(i, i + CHUNK)
+
+      const ev = await supabase.from('email_events').delete().in('send_id', chunk)
+      if (ev.error && !firstError) firstError = { stage: 'events', err: ev.error }
+
+      const at = await supabase.from('send_attachments').delete().in('send_id', chunk)
+      if (at.error && !firstError) firstError = { stage: 'attachments', err: at.error }
+
+      const se = await supabase.from('email_sends').delete().in('id', chunk).eq('tenant_id', tenantId)
+      if (se.error && !firstError) firstError = { stage: 'sends', err: se.error }
+    }
+
+    if (firstError) {
+      alert(`Failed to delete ${firstError.stage}: ${firstError.err.message}`)
+      return
+    }
+
+    // Best-effort storage cleanup (chunked).
     // .remove() does not error on missing files, so safe even if cron already
     // purged them.
-    if (pathsToRemove.length > 0) {
-      const { error: storageErr } = await supabase.storage.from(BUCKET_NAME).remove(pathsToRemove)
+    for (let i = 0; i < pathsToRemove.length; i += CHUNK) {
+      const chunk = pathsToRemove.slice(i, i + CHUNK)
+      const { error: storageErr } = await supabase.storage.from(BUCKET_NAME).remove(chunk)
       if (storageErr) console.error('Storage cleanup failed (rows already deleted):', storageErr)
     }
 
