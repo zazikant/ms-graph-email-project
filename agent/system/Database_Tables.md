@@ -222,6 +222,21 @@ Graph API call logs.
 
 ---
 
+## Delete Cascade Behaviour (UI)
+
+The History and Files tabs now perform **cascading deletes** so no orphans are left behind:
+
+| UI action | What gets deleted |
+|-----------|-------------------|
+| History → Delete single record | `email_events` rows for send_id → `send_attachments` rows for send_id → **storage files** at the paths listed in those send_attachments rows → `email_sends` row |
+| History → Delete All / filtered | Same as above, bulk by `send_id IN (...)` |
+| Files → Delete single file | **storage file** at path → `send_attachments` rows where `storage_path = path` |
+| Files → Delete All / filtered | **storage files** at `${tenantId}/${file.name}` paths → `send_attachments` rows where `storage_path IN (...)` |
+
+Storage deletion is **best-effort**: if a file was already removed (e.g. by the hourly `cleanup-old-records` cron), `supabase.storage.from(bucket).remove([...])` does not error — the operation continues. Database row deletion is the source of truth; if it succeeds, the file is considered gone even if storage cleanup silently no-ops.
+
+---
+
 ## Enum Types
 
 | Enum Name | Values |

@@ -1585,6 +1585,15 @@ function HistoryTab({ session }: { session: Session }) {
     if (!tenantId) return
     if (!confirm('Delete this record? This cannot be undone.')) return
 
+    // Fetch attachment storage_paths BEFORE deleting the rows, so we can also
+    // delete the actual file bytes from the storage bucket. Without this,
+    // deleting a History record leaves orphan files in storage.
+    const { data: attRows } = await supabase
+      .from('send_attachments')
+      .select('storage_path')
+      .eq('send_id', id)
+    const pathsToRemove = (attRows || []).map(r => r.storage_path).filter(Boolean)
+
     const { error: evtErr } = await supabase.from('email_events').delete().eq('send_id', id)
     if (evtErr) { alert(`Failed: ${evtErr.message}`); return }
 
@@ -1593,6 +1602,13 @@ function HistoryTab({ session }: { session: Session }) {
 
     const { error: sendErr } = await supabase.from('email_sends').delete().eq('id', id).eq('tenant_id', tenantId)
     if (sendErr) { alert(`Failed: ${sendErr.message}`); return }
+
+    // Best-effort storage cleanup. .remove() does not error on missing files,
+    // so this is safe even if the hourly cleanup_old_files() cron already got them.
+    if (pathsToRemove.length > 0) {
+      const { error: storageErr } = await supabase.storage.from(BUCKET_NAME).remove(pathsToRemove)
+      if (storageErr) console.error('Storage cleanup failed (rows already deleted):', storageErr)
+    }
 
     setSends(sends.filter(s => s.id !== id))
     const newAttachments: Record<string, Attachment[]> = {}
@@ -1620,6 +1636,15 @@ function HistoryTab({ session }: { session: Session }) {
 
     const sendIds = dataToDelete.map(s => s.id)
 
+    // Fetch attachment storage_paths BEFORE deleting the rows, so we can also
+    // delete the actual file bytes from the storage bucket. Without this,
+    // bulk delete leaves orphan files in storage.
+    const { data: attRows } = await supabase
+      .from('send_attachments')
+      .select('storage_path')
+      .in('send_id', sendIds)
+    const pathsToRemove = (attRows || []).map(r => r.storage_path).filter(Boolean)
+
     const deleteEvents = await supabase.from('email_events').delete().in('send_id', sendIds)
     const deleteAttachments = await supabase.from('send_attachments').delete().in('send_id', sendIds)
     const deleteSends = await supabase.from('email_sends').delete().in('id', sendIds).eq('tenant_id', tenantId)
@@ -1638,6 +1663,14 @@ function HistoryTab({ session }: { session: Session }) {
       console.error('Failed to delete sends:', deleteSends.error)
       alert(`Failed to delete sends: ${deleteSends.error.message}`)
       return
+    }
+
+    // Best-effort storage cleanup after successful row deletion.
+    // .remove() does not error on missing files, so safe even if cron already
+    // purged them.
+    if (pathsToRemove.length > 0) {
+      const { error: storageErr } = await supabase.storage.from(BUCKET_NAME).remove(pathsToRemove)
+      if (storageErr) console.error('Storage cleanup failed (rows already deleted):', storageErr)
     }
 
     setSends(sends.filter(s => !sendIds.includes(s.id)))
@@ -1872,13 +1905,20 @@ function FilesTab({ session }: { session: Session }) {
   }
 
   const handleDelete = async (path: string) => {
-    if (!confirm('Delete this file?')) return
+    if (!confirm('Delete this file? This will also remove any attachment references in send history.')) return
     const { error } = await supabase.storage.from(BUCKET_NAME).remove([path])
     if (error) {
       alert(`Delete failed: ${error.message}`)
-    } else {
-      fetchFiles()
+      return
     }
+    // Cascade: delete send_attachments rows that reference this storage path,
+    // so we don't leave dangling metadata pointing at a deleted file.
+    const { error: attErr } = await supabase
+      .from('send_attachments')
+      .delete()
+      .eq('storage_path', path)
+    if (attErr) console.error('Failed to cascade-delete send_attachments:', attErr)
+    fetchFiles()
   }
 
   const getPublicUrl = (path: string) => {
@@ -1917,8 +1957,8 @@ function FilesTab({ session }: { session: Session }) {
     if (filesToDelete.length === 0 || !tenantId) return
 
     const confirmMsg = hasFilters
-      ? `Delete ${filesToDelete.length} filtered files? This cannot be undone.`
-      : `Delete ALL ${filesToDelete.length} files? This cannot be undone.`
+      ? `Delete ${filesToDelete.length} filtered files? This will also remove any attachment references in send history. This cannot be undone.`
+      : `Delete ALL ${filesToDelete.length} files? This will also remove any attachment references in send history. This cannot be undone.`
 
     if (!confirm(confirmMsg)) return
 
@@ -1928,6 +1968,13 @@ function FilesTab({ session }: { session: Session }) {
       alert(`Delete failed: ${error.message}`)
       return
     }
+    // Cascade: delete send_attachments rows that referenced any of these
+    // storage paths, so we don't leave dangling metadata.
+    const { error: attErr } = await supabase
+      .from('send_attachments')
+      .delete()
+      .in('storage_path', pathsToDelete)
+    if (attErr) console.error('Failed to cascade-delete send_attachments:', attErr)
     fetchFiles()
   }
 
