@@ -1429,6 +1429,7 @@ interface EmailEvent {
 }
 
 function HistoryTab({ session }: { session: Session }) {
+  const BUCKET_NAME = 'dfsdfsdf'
   const [sends, setSends] = useState<EmailSend[]>([])
   const [attachments, setAttachments] = useState<Record<string, Attachment[]>>({})
   const [events, setEvents] = useState<Record<string, EmailEvent[]>>({})
