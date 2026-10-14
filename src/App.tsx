@@ -11,6 +11,90 @@ const CONFIRM_USER_URL = `${supabaseUrl}/functions/v1/confirm-user`
 
 type AuthView = 'login' | 'signup' | 'pending' | 'invitation_required'
 
+// ===== Bulk-operation helpers =====
+// Supabase PostgREST caps every SELECT at 1000 rows by default.
+// Any list that needs to load "everything" -- contacts, email_sends,
+// recipient_list, etc. -- must therefore be paginated through .range()
+// to bypass the cap. The helpers below also chunk .in() filters because
+// PostgREST encodes .in() values in the URL, and URLs longer than ~8KB
+// return 414 URI Too Long. Practical limit is ~300 UUIDs per request.
+
+/** Split an array into chunks of `size`. */
+function chunkArray<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = []
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size))
+  return out
+}
+
+// PostgREST .in() URL-length safety limit. UUIDs are 36 chars + comma,
+// so 200 UUIDs ~= 7.4KB -- safely under the 8KB PostgREST/Supabase gateway limit.
+const POSTGREST_IN_CHUNK = 200
+
+/**
+ * Exhaust a Supabase SELECT builder through .range() pagination so the
+ * 1000-row PostgREST cap does not silently truncate the result.
+ *
+ * Usage:
+ *   const all = await fetchAllPaginated(
+ *     supabase.from('contacts').select('*').eq('tenant_id', tenantId)
+ *   )
+ */
+async function fetchAllPaginated<T = any>(
+  // Typed loosely on purpose: supabase-js returns PostgrestFilterBuilder
+  // which is a Thenable (not a real Promise), so a stricter signature
+  // would force every call site to cast. We only call .range() on it.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  builder: any,
+  pageSize = 1000
+): Promise<T[]> {
+  const all: T[] = []
+  let from = 0
+  // Hard upper bound to prevent an accidental infinite loop.
+  const MAX_ROWS = 1_000_000
+  while (from < MAX_ROWS) {
+    const to = from + pageSize - 1
+    const { data, error } = await builder.range(from, to)
+    if (error) throw error
+    if (!data || data.length === 0) break
+    all.push(...(data as T[]))
+    if (data.length < pageSize) break // last page reached
+    from += pageSize
+  }
+  return all
+}
+
+/**
+ * List every object in a Supabase Storage folder by paginating
+ * `.list(folder, { limit, offset })`. The storage API caps `limit` at
+ * 100 per request and silently truncates beyond that, so we loop on offset.
+ */
+async function listAllStorageFiles(
+  bucket: string,
+  folder: string,
+  pageSize = 100
+): Promise<{ name: string; id: string; updated_at?: string; metadata?: Record<string, unknown> }[]> {
+  const out: { name: string; id: string; updated_at?: string; metadata?: Record<string, unknown> }[] = []
+  let offset = 0
+  const MAX_FILES = 100_000
+  while (offset < MAX_FILES) {
+    const { data, error } = await supabase
+      .storage
+      .from(bucket)
+      .list(folder, { limit: pageSize, offset, sortBy: { column: 'name', order: 'asc' } })
+    if (error) throw error
+    if (!data || data.length === 0) break
+    out.push(...data.map(f => ({
+      name: f.name,
+      id: f.id ?? '',
+      updated_at: f.updated_at || '',
+      metadata: f.metadata || {}
+    })))
+    if (data.length < pageSize) break
+    offset += pageSize
+  }
+  return out
+}
+
 export default function App() {
   const [session, setSession] = useState<Session | null>(null)
   const [loading, setLoading] = useState(true)
@@ -425,13 +509,16 @@ function ComposeTab({ session, attachments, setAttachments }: { session: Session
       const { data: membership } = await supabase.from('memberships').select('tenant_id').eq('user_id', session.user.id).single()
       if (!membership) return
       setTenantId(membership.tenant_id)
-      const { data } = await supabase.storage.from(BUCKET_NAME).list(membership.tenant_id, { limit: 100 })
-      if (data) {
-        setAvailableFiles(data.map(f => ({
+      // Paginated storage list -- bypasses the 100-object cap on .list()
+      try {
+        const allFiles = await listAllStorageFiles(BUCKET_NAME, membership.tenant_id)
+        setAvailableFiles(allFiles.map(f => ({
           name: f.name,
           path: `${membership.tenant_id}/${f.name}`,
-          size: f.metadata?.size || 0
+          size: (f.metadata?.size as number) || 0
         })))
+      } catch (err) {
+        console.error('Failed to list storage files:', err)
       }
     }
     fetchTenantAndFiles()
@@ -441,8 +528,17 @@ function ComposeTab({ session, attachments, setAttachments }: { session: Session
     const fetchContacts = async () => {
       const { data: membership } = await supabase.from('memberships').select('tenant_id').eq('user_id', session.user.id).single()
       if (!membership) return
-      const { data } = await supabase.from('contacts').select('email, name').eq('tenant_id', membership.tenant_id).neq('status', 'hardbounced')
-      if (data) setContacts(data)
+      // Paginated -- bypasses the 1000-row PostgREST cap. Important because
+      // the autocomplete dropdown is sourced from this list, and tenants
+      // with >1000 subscribers would otherwise see only the first page.
+      try {
+        const all = await fetchAllPaginated<{ email: string; name: string | null }>(
+          supabase.from('contacts').select('email, name').eq('tenant_id', membership.tenant_id).neq('status', 'hardbounced')
+        )
+        setContacts(all)
+      } catch (err) {
+        console.error('Failed to load contacts:', err)
+      }
 
       const { data: listsData } = await supabase.from('lists').select('id, name').eq('tenant_id', membership.tenant_id).order('name')
       if (listsData) setLists(listsData)
@@ -465,18 +561,18 @@ function ComposeTab({ session, attachments, setAttachments }: { session: Session
     setShowContactDropdown(false)
   }
 
-  const refreshFiles = () => {
+  const refreshFiles = async () => {
     if (!tenantId) return
-    supabase.storage.from(BUCKET_NAME).list(tenantId, { limit: 100 })
-      .then(({ data }) => {
-        if (data) {
-          setAvailableFiles(data.map(f => ({
-            name: f.name,
-            path: `${tenantId}/${f.name}`,
-            size: f.metadata?.size || 0
-          })))
-        }
-      })
+    try {
+      const allFiles = await listAllStorageFiles(BUCKET_NAME, tenantId)
+      setAvailableFiles(allFiles.map(f => ({
+        name: f.name,
+        path: `${tenantId}/${f.name}`,
+        size: (f.metadata?.size as number) || 0
+      })))
+    } catch (err) {
+      console.error('Failed to refresh files:', err)
+    }
   }
 
   const addFile = (file: {name: string, path: string, size: number}) => {
@@ -907,13 +1003,24 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
     const { data: membership } = await supabase.from('memberships').select('tenant_id').eq('user_id', session.user.id).single()
     if (!membership) { setLoading(false); return }
 
-    const [contactsRes, listsRes] = await Promise.all([
-      supabase.from('contacts').select('*').eq('tenant_id', membership.tenant_id).order('created_at', { ascending: false }),
-      supabase.from('lists').select('*').eq('tenant_id', membership.tenant_id).order('name')
-    ])
-
-    if (contactsRes.data) setContacts(contactsRes.data as Contact[])
-    if (listsRes.data) setLists(listsRes.data as ContactList[])
+    // Contacts must be loaded via paginated fetch -- without this, the
+    // PostgREST 1000-row cap silently truncates the visible list, the
+    // CSV export, AND the bulk-delete target. Lists are usually small
+    // (<100) so the cap doesn't bite, but we paginate for safety.
+    try {
+      const [allContacts, allLists] = await Promise.all([
+        fetchAllPaginated<Contact>(
+          supabase.from('contacts').select('*').eq('tenant_id', membership.tenant_id).order('created_at', { ascending: false })
+        ),
+        fetchAllPaginated<ContactList>(
+          supabase.from('lists').select('*').eq('tenant_id', membership.tenant_id).order('name')
+        )
+      ])
+      setContacts(allContacts)
+      setLists(allLists)
+    } catch (err) {
+      console.error('Failed to fetch contacts/lists:', err)
+    }
     setLoading(false)
   }
 
@@ -1222,8 +1329,18 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
     if (contactsToDelete.length === 0) return
 
     const contactIds = contactsToDelete.map(c => c.id)
-    for (const id of contactIds) {
-      await supabase.from('contacts').delete().eq('id', id)
+    // Chunk the .in() filter -- PostgREST .in() is URL-encoded and
+    // exceeds the 8KB URL limit around ~300 UUIDs. Chunking to 200
+    // keeps every request safely under the limit. This also replaces
+    // the prior one-row-at-a-time loop which was O(n) round-trips
+    // (3 seconds for 3000 contacts -> ~0.3s with chunks of 200).
+    let firstError: string | null = null
+    for (const chunk of chunkArray(contactIds, POSTGREST_IN_CHUNK)) {
+      const { error } = await supabase.from('contacts').delete().in('id', chunk)
+      if (error && !firstError) firstError = error.message
+    }
+    if (firstError) {
+      alert(`Some deletes failed: ${firstError}. Refresh the list to see remaining records.`)
     }
     setShowDeleteModal(false)
     fetchData()
@@ -1451,40 +1568,56 @@ function HistoryTab({ session }: { session: Session }) {
       if (!membership) { setLoading(false); return }
       setTenantId(membership.tenant_id)
 
-      const { data } = await supabase.from('email_sends').select('*').eq('tenant_id', membership.tenant_id).order('created_at', { ascending: false }).limit(200)
-      if (data) setSends(data as EmailSend[])
-      
-      const sendIds = data?.map(s => s.id) || []
+      // Paginated fetch for email_sends -- bypasses the 1000-row cap
+      // that previously truncated History to 200 visible records.
+      let allSends: EmailSend[] = []
+      try {
+        allSends = await fetchAllPaginated<EmailSend>(
+          supabase.from('email_sends').select('*').eq('tenant_id', membership.tenant_id).order('created_at', { ascending: false })
+        )
+      } catch (err) {
+        console.error('Failed to load email_sends:', err)
+      }
+      setSends(allSends)
+
+      const sendIds = allSends.map(s => s.id)
       if (sendIds.length > 0) {
-        const { data: atts } = await supabase.from('send_attachments').select('*').in('send_id', sendIds)
-        if (atts) {
-          const attMap: Record<string, Attachment[]> = {}
-          atts.forEach((a: Attachment) => {
+        // Chunk .in() -- a tenant with 3000 sends would otherwise blow
+        // past the PostgREST URL length limit on the attachments/events query.
+        const attMap: Record<string, Attachment[]> = {}
+        for (const chunk of chunkArray(sendIds, POSTGREST_IN_CHUNK)) {
+          const { data: atts } = await supabase.from('send_attachments').select('*').in('send_id', chunk)
+          if (atts) atts.forEach((a: Attachment) => {
             if (!attMap[a.send_id]) attMap[a.send_id] = []
             attMap[a.send_id].push(a)
           })
-          setAttachments(attMap)
         }
-        
-        const { data: evts } = await supabase.from('email_events').select('*').in('send_id', sendIds).order('created_at', { ascending: true })
-        if (evts) {
-          const evtMap: Record<string, EmailEvent[]> = {}
-          evts.forEach((e: EmailEvent) => {
+        setAttachments(attMap)
+
+        const evtMap: Record<string, EmailEvent[]> = {}
+        for (const chunk of chunkArray(sendIds, POSTGREST_IN_CHUNK)) {
+          const { data: evts } = await supabase.from('email_events').select('*').in('send_id', chunk).order('created_at', { ascending: true })
+          if (evts) evts.forEach((e: EmailEvent) => {
             if (!evtMap[e.send_id]) evtMap[e.send_id] = []
             evtMap[e.send_id].push(e)
           })
-          setEvents(evtMap)
         }
+        setEvents(evtMap)
       }
 
-      // Fetch contact names for recipient lookup in CSV
-      const { data: contactData } = await supabase.from('contacts').select('email, name').eq('tenant_id', membership.tenant_id)
-      if (contactData) {
+      // Paginated fetch for contacts name lookup -- without this, tenants
+      // with >1000 contacts get incomplete recipient-name columns in the CSV.
+      try {
+        const allContacts = await fetchAllPaginated<{ email: string; name: string | null }>(
+          supabase.from('contacts').select('email, name').eq('tenant_id', membership.tenant_id)
+        )
         const nameMap: Record<string, string> = {}
-        contactData.forEach((c: { email: string; name: string | null }) => {
+        allContacts.forEach(c => {
           if (c.name) nameMap[c.email.toLowerCase()] = c.name
         })
         setContactNames(nameMap)
+      } catch (err) {
+        console.error('Failed to load contact names:', err)
       }
 
       setLoading(false)
@@ -1661,8 +1794,9 @@ function HistoryTab({ session }: { session: Session }) {
     if (!confirm(confirmMsg)) return
 
     // PostgREST has URL length limits on .in() filters (~300 UUIDs max).
-    // Chunk to 200 at a time to stay safely under.
-    const CHUNK = 200
+    // Chunk to 200 at a time to stay safely under. Works for any list
+    // size -- 3000 sends = 15 chunks, fully deleted.
+    const CHUNK = POSTGREST_IN_CHUNK
 
     // Fetch attachment storage_paths BEFORE deleting the rows (chunked).
     const pathsToRemove: string[] = []
@@ -1893,17 +2027,20 @@ function FilesTab({ session }: { session: Session }) {
   const fetchFiles = async () => {
     if (!tenantId) return
     setLoading(true)
-    const { data, error } = await supabase.storage.from(BUCKET_NAME).list(tenantId, { limit: 100 })
-    if (error) {
-      console.error('Error fetching files:', error)
-    } else if (data) {
-      setFiles(data.map(f => ({
+    // Paginated storage list -- the prior `{ limit: 100 }` silently
+    // truncated to 100 files per folder. Tenants with >100 uploaded
+    // attachments would see only the first 100 in the Files tab.
+    try {
+      const allFiles = await listAllStorageFiles(BUCKET_NAME, tenantId)
+      setFiles(allFiles.map(f => ({
         name: f.name,
         id: f.id,
         updated_at: f.updated_at || '',
-        size: f.metadata?.size || 0,
+        size: (f.metadata?.size as number) || 0,
         metadata: f.metadata || {}
       })))
+    } catch (err) {
+      console.error('Error fetching files:', err)
     }
     setLoading(false)
   }
@@ -1994,18 +2131,31 @@ function FilesTab({ session }: { session: Session }) {
     if (!confirm(confirmMsg)) return
 
     const pathsToDelete = filesToDelete.map(f => `${tenantId}/${f.name}`)
-    const { error } = await supabase.storage.from(BUCKET_NAME).remove(pathsToDelete)
-    if (error) {
-      alert(`Delete failed: ${error.message}`)
-      return
+
+    // Storage .remove() takes a body, so no URL length issue on the
+    // storage call itself. But chunk anyway -- 1000 files in one HTTP
+    // POST body is heavy and some Supabase gateway tiers cap body size.
+    const STORAGE_REMOVE_CHUNK = 500
+    for (const chunk of chunkArray(pathsToDelete, STORAGE_REMOVE_CHUNK)) {
+      const { error } = await supabase.storage.from(BUCKET_NAME).remove(chunk)
+      if (error) {
+        alert(`Delete failed: ${error.message}`)
+        return
+      }
     }
+
     // Cascade: delete send_attachments rows that referenced any of these
     // storage paths, so we don't leave dangling metadata.
-    const { error: attErr } = await supabase
-      .from('send_attachments')
-      .delete()
-      .in('storage_path', pathsToDelete)
-    if (attErr) console.error('Failed to cascade-delete send_attachments:', attErr)
+    // Chunk .in() -- storage paths are long strings, so the URL limit
+    // bites at ~80-100 paths. Chunking to 100 keeps us safely under.
+    const STORAGE_PATH_IN_CHUNK = 100
+    for (const chunk of chunkArray(pathsToDelete, STORAGE_PATH_IN_CHUNK)) {
+      const { error: attErr } = await supabase
+        .from('send_attachments')
+        .delete()
+        .in('storage_path', chunk)
+      if (attErr) console.error('Failed to cascade-delete send_attachments:', attErr)
+    }
     fetchFiles()
   }
 
@@ -2236,8 +2386,9 @@ function ListsTab({ session, onSelectList, onListsChanged }: { session: Session,
     if (!confirm(confirmMsg)) return
 
     const listIds = dataToDelete.map(l => l.id)
-    for (const id of listIds) {
-      await supabase.from('lists').delete().eq('id', id)
+    // Chunked .in() -- replaces the prior one-list-at-a-time loop.
+    for (const chunk of chunkArray(listIds, POSTGREST_IN_CHUNK)) {
+      await supabase.from('lists').delete().in('id', chunk)
     }
     fetchLists()
   }
@@ -2445,6 +2596,9 @@ function BatchesTab({ session }: { session: Session }) {
   const deleteFilteredBatches = async () => {
     if (!tenantId) return
 
+    // Fetch ALL matching batch IDs (paginated) -- without this, only
+    // the first 1000 batches would be deleted even when the user
+    // confirms 'Delete All'.
     let deleteQuery = supabase.from('batches').select('id').eq('tenant_id', tenantId)
     if (search) {
       if (exactMatch) {
@@ -2454,8 +2608,14 @@ function BatchesTab({ session }: { session: Session }) {
       }
     }
 
-    const { data: batchesToDelete } = await deleteQuery
-    if (!batchesToDelete || batchesToDelete.length === 0) return
+    let batchesToDelete: { id: string }[] = []
+    try {
+      batchesToDelete = await fetchAllPaginated<{ id: string }>(deleteQuery)
+    } catch (err) {
+      alert(`Failed to list batches for deletion: ${err instanceof Error ? err.message : err}`)
+      return
+    }
+    if (batchesToDelete.length === 0) return
 
     const confirmMsg = hasFilters
       ? `Delete ${batchesToDelete.length} filtered batches? This cannot be undone.`
@@ -2464,13 +2624,23 @@ function BatchesTab({ session }: { session: Session }) {
     if (!confirm(confirmMsg)) return
 
     const batchIds = batchesToDelete.map(b => b.id)
-    for (const id of batchIds) {
-      await supabase.from('recipient_list').delete().eq('batch_id', id)
+
+    // Chunked recipient_list delete -- .in() would blow URL length past
+    // ~300 UUIDs. Replaces the previous one-batch-at-a-time loop
+    // (was O(n) round-trips; now ~n/200 round-trips).
+    for (const chunk of chunkArray(batchIds, POSTGREST_IN_CHUNK)) {
+      const { error: rlErr } = await supabase.from('recipient_list').delete().in('batch_id', chunk)
+      if (rlErr) console.error('recipient_list delete chunk failed:', rlErr)
     }
-    const { error } = await supabase.from('batches').delete().in('id', batchIds).eq('tenant_id', tenantId)
-    if (error) {
-      console.error('Failed to delete batches:', error)
-      alert(`Failed to delete batches: ${error.message}`)
+
+    // Chunked batches delete -- same reason.
+    let firstError: string | null = null
+    for (const chunk of chunkArray(batchIds, POSTGREST_IN_CHUNK)) {
+      const { error } = await supabase.from('batches').delete().in('id', chunk).eq('tenant_id', tenantId)
+      if (error && !firstError) firstError = error.message
+    }
+    if (firstError) {
+      alert(`Some batches failed to delete: ${firstError}. Refresh to see remaining.`)
       return
     }
     fetchBatches(1)
@@ -2507,10 +2677,16 @@ function BatchesTab({ session }: { session: Session }) {
       setExpandedId(expandedId === batchId ? null : batchId)
       return
     }
-    const { data } = await supabase.from('recipient_list').select('email, status, error_detail').eq('batch_id', batchId).order('created_at')
-    if (data) {
-      setRecipients(prev => ({ ...prev, [batchId]: data as { email: string; status: string; error_detail: string | null }[] }))
+    // Paginated -- batches with >1000 recipients (e.g. 3000-mail sends)
+    // would otherwise have their recipient list silently truncated.
+    try {
+      const all = await fetchAllPaginated<{ email: string; status: string; error_detail: string | null }>(
+        supabase.from('recipient_list').select('email, status, error_detail').eq('batch_id', batchId).order('created_at')
+      )
+      setRecipients(prev => ({ ...prev, [batchId]: all }))
       setExpandedId(batchId)
+    } catch (err) {
+      console.error('Failed to load recipients:', err)
     }
   }
 
