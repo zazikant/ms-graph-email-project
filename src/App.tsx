@@ -979,6 +979,13 @@ interface ContactList {
 }
 
 function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: Session, filterListId: string | null, refreshListsKey?: number }) {
+  // Server-side pagination state — same pattern as HistoryTab.
+  // Only the visible page of CONTACTS_PER_PAGE rows is held in memory
+  // at a time. The previous implementation loaded 500 contacts at once,
+  // which for tenants with 3000+ contacts was the slowest-loading tab
+  // in the app.
+  const CONTACTS_PER_PAGE = 10
+
   const [contacts, setContacts] = useState<Contact[]>([])
   const [lists, setLists] = useState<ContactList[]>([])
   const [loading, setLoading] = useState(true)
@@ -996,100 +1003,154 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
   const [uploading, setUploading] = useState(false)
   const [currentPage, setCurrentPage] = useState(1)
   const [showDeleteModal, setShowDeleteModal] = useState(false)
-  const [hasMoreContacts, setHasMoreContacts] = useState(false)
-  const [oldestContactCreatedAt, setOldestContactCreatedAt] = useState<string | null>(null)
-  const [loadingMore, setLoadingMore] = useState(false)
-  const CONTACTS_PER_PAGE = 10
-  // Same rationale as HistoryTab: capping the initial load at 500 most-recent
-  // contacts keeps the tab usable for tenants with thousands of contacts
-  // (the prior fetchAllPaginated could take 10+ seconds on a live campaign).
-  const CONTACTS_PAGE_SIZE = 500
+  const [totalCount, setTotalCount] = useState(0)
+  const [tenantId, setTenantId] = useState<string | null>(null)
 
-  const fetchData = async () => {
-    setLoading(true)
-    const { data: membership } = await supabase.from('memberships').select('tenant_id').eq('user_id', session.user.id).single()
-    if (!membership) { setLoading(false); return }
+  // Debounce search inputs so we don't fire a Supabase query on every
+  // keystroke. Same default as HistoryTab (350ms).
+  const [debouncedSearchEmail, setDebouncedSearchEmail] = useState('')
+  const [debouncedSearchName, setDebouncedSearchName] = useState('')
+  const [debouncedFilterStatus, setDebouncedFilterStatus] = useState('')
+  const [debouncedFilterList, setDebouncedFilterList] = useState('')
+  const [debouncedDateFrom, setDebouncedDateFrom] = useState('')
+  const [debouncedDateTo, setDebouncedDateTo] = useState('')
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setDebouncedSearchEmail(searchEmail)
+      setDebouncedSearchName(searchName)
+      setDebouncedFilterStatus(filterStatus)
+      setDebouncedFilterList(filterList)
+      setDebouncedDateFrom(dateFrom)
+      setDebouncedDateTo(dateTo)
+    }, 350)
+    return () => clearTimeout(t)
+  }, [searchEmail, searchName, filterStatus, filterList, dateFrom, dateTo])
 
-    // Lists are usually small (<100), so we still load them in full.
-    // Contacts are capped at CONTACTS_PAGE_SIZE most-recent for instant load.
+  const hasFilters = !!(debouncedSearchEmail || debouncedSearchName || debouncedFilterStatus || debouncedFilterList || debouncedDateFrom || debouncedDateTo)
+
+  const clearFilters = () => {
+    setSearchEmail('')
+    setSearchName('')
+    setFilterStatus('')
+    setFilterList('')
+    setDateFrom('')
+    setDateTo('')
+    setCurrentPage(1)
+  }
+
+  // Build the contacts query with all server-pushable filters applied.
+  // - searchEmail matches email (case-insensitive .ilike())
+  // - searchName matches name (.ilike())
+  // - filterStatus exact match
+  // - filterList exact match
+  // - dateFrom / dateTo use .gte() and .lte() on created_at
+  const buildContactsQuery = (membershipTenantId: string) => {
+    let q = supabase
+      .from('contacts')
+      .select('*', { count: 'exact' })
+      .eq('tenant_id', membershipTenantId)
+      .order('created_at', { ascending: false })
+
+    if (debouncedSearchEmail.trim()) {
+      const term = debouncedSearchEmail.trim()
+      if (exactMatch) {
+        q = q.eq('email', term.toLowerCase())
+      } else {
+        q = q.ilike('email', `%${term}%`)
+      }
+    }
+    if (debouncedSearchName.trim()) {
+      const term = debouncedSearchName.trim()
+      if (exactMatch) {
+        q = q.ilike('name', term) // exact match on name still uses ilike since NULL handling differs
+      } else {
+        q = q.ilike('name', `%${term}%`)
+      }
+    }
+    if (debouncedFilterStatus) {
+      q = q.eq('status', debouncedFilterStatus)
+    }
+    if (debouncedFilterList) {
+      q = q.eq('list_id', debouncedFilterList)
+    }
+    if (debouncedDateFrom) {
+      q = q.gte('created_at', new Date(debouncedDateFrom + 'T00:00:00').toISOString())
+    }
+    if (debouncedDateTo) {
+      q = q.lte('created_at', new Date(debouncedDateTo + 'T23:59:59').toISOString())
+    }
+    return q
+  }
+
+  // Fetch ONE page of contacts (size = CONTACTS_PER_PAGE) + total count.
+  // Uses a `cancelled` flag so fast page/filter changes don't race.
+  const fetchPage = async (page: number, membershipTenantId: string, opts: { silent?: boolean } = {}) => {
+    const { silent } = opts
+    if (!silent) setLoading(true)
+
+    const from = (page - 1) * CONTACTS_PER_PAGE
+    const to = from + CONTACTS_PER_PAGE - 1
+
     try {
-      const { data: listData, error: listErr } = await supabase
+      const { data: pageRows, error: pageErr, count } = await buildContactsQuery(membershipTenantId).range(from, to)
+      if (pageErr) throw pageErr
+      setContacts((pageRows || []) as Contact[])
+      if (count !== null && count !== undefined) setTotalCount(count)
+    } catch (err) {
+      console.error('Failed to load contacts page:', err)
+    } finally {
+      if (!silent) setLoading(false)
+    }
+  }
+
+  // Initial mount + tenant resolution + lists load (lists are small).
+  useEffect(() => {
+    let cancelled = false
+    const init = async () => {
+      setLoading(true)
+      const { data: membership } = await supabase.from('memberships').select('tenant_id').eq('user_id', session.user.id).single()
+      if (cancelled) return
+      if (!membership) { setLoading(false); return }
+      setTenantId(membership.tenant_id)
+
+      // Lists are small (<100 rows usually) so load them in full once.
+      const { data: listData } = await supabase
         .from('lists')
         .select('*')
         .eq('tenant_id', membership.tenant_id)
         .order('name')
-      if (listErr) throw listErr
+      if (cancelled) return
       setLists((listData || []) as ContactList[])
 
-      // Fetch one page of contacts + 1 extra row to detect whether more
-      // records exist beyond the cap.
-      const { data: contactPage, error: contactErr } = await supabase
-        .from('contacts')
-        .select('*')
-        .eq('tenant_id', membership.tenant_id)
-        .order('created_at', { ascending: false })
-        .limit(CONTACTS_PAGE_SIZE + 1)
-      if (contactErr) throw contactErr
-
-      const rows = (contactPage || []) as Contact[]
-      let more = false
-      if (rows.length > CONTACTS_PAGE_SIZE) {
-        more = true
-        rows.length = CONTACTS_PAGE_SIZE
-      }
-      setHasMoreContacts(more)
-      setContacts(rows)
-      setOldestContactCreatedAt(rows.length > 0 ? rows[rows.length - 1].created_at : null)
-    } catch (err) {
-      console.error('Failed to fetch contacts/lists:', err)
+      await fetchPage(1, membership.tenant_id)
+      if (cancelled) return
     }
-    setLoading(false)
-  }
+    init()
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session.user.id, refreshListsKey])
 
-  const loadMoreContacts = async () => {
-    if (loadingMore || !oldestContactCreatedAt || !hasMoreContacts) return
-    setLoadingMore(true)
-    try {
-      const { data: membership } = await supabase.from('memberships').select('tenant_id').eq('user_id', session.user.id).single()
-      if (!membership) { setLoadingMore(false); return }
-
-      const { data: contactPage, error: contactErr } = await supabase
-        .from('contacts')
-        .select('*')
-        .eq('tenant_id', membership.tenant_id)
-        .lt('created_at', oldestContactCreatedAt)
-        .order('created_at', { ascending: false })
-        .limit(CONTACTS_PAGE_SIZE + 1)
-      if (contactErr) throw contactErr
-
-      const rows = (contactPage || []) as Contact[]
-      let more = false
-      if (rows.length > CONTACTS_PAGE_SIZE) {
-        more = true
-        rows.length = CONTACTS_PAGE_SIZE
-      }
-      setHasMoreContacts(more)
-      setContacts(prev => [...prev, ...rows])
-      if (rows.length > 0) setOldestContactCreatedAt(rows[rows.length - 1].created_at)
-    } catch (err) {
-      console.error('Failed to load more contacts:', err)
-    }
-    setLoadingMore(false)
-  }
-
+  // Re-fetch when page or any filter changes.
   useEffect(() => {
-    fetchData()
-  }, [])
+    if (!tenantId) return
+    let cancelled = false
+    const refetch = async () => {
+      await fetchPage(currentPage, tenantId, { silent: true })
+      if (cancelled) return
+    }
+    refetch()
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tenantId, currentPage, debouncedSearchEmail, debouncedSearchName, debouncedFilterStatus, debouncedFilterList, debouncedDateFrom, debouncedDateTo])
 
+  // When filterListId is set from the parent (clicking a list count in
+  // the Lists tab), apply it as a filter and reset to page 1.
   useEffect(() => {
     if (filterListId) {
       setFilterList(filterListId)
+      setCurrentPage(1)
     }
   }, [filterListId])
-
-  useEffect(() => {
-    fetchData()
-  }, [session.user.id, refreshListsKey])
 
   const handleAddContact = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -1132,13 +1193,21 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
     setNewName('')
     setNewStatus('subscribed')
     setNewListId('')
-    fetchData()
+    // Re-fetch the current page to reflect the new/updated contact.
+    if (tenantId) await fetchPage(currentPage, tenantId, { silent: true })
   }
 
   const handleDelete = async (id: string) => {
     if (!confirm('Delete contact?')) return
     await supabase.from('contacts').delete().eq('id', id)
-    fetchData()
+    // Re-fetch the current page (or page 1 if we deleted the last row on a
+    // trailing page).
+    if (tenantId) {
+      const newTotal = Math.max(0, totalCount - 1)
+      const newPage = Math.min(currentPage, Math.max(1, Math.ceil(newTotal / CONTACTS_PER_PAGE)))
+      setCurrentPage(newPage)
+      await fetchPage(newPage, tenantId, { silent: true })
+    }
   }
 
   // Parse entire CSV text into rows, handling multi-line quoted fields per RFC 4180
@@ -1372,7 +1441,8 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
       if (firstInsertError) msg += `\n\nSome inserts failed: ${firstInsertError}`
       if (firstUpdateError) msg += `\n\nSome updates failed: ${firstUpdateError}`
       alert(msg)
-      fetchData()
+      // Re-fetch the current page so newly-added contacts appear.
+      if (tenantId) await fetchPage(currentPage, tenantId, { silent: true })
     } catch (err) {
       alert(`Import failed: ${err instanceof Error ? err.message : 'Unknown error'}`)
     }
@@ -1399,11 +1469,9 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
   }
 
   const downloadContactsCSV = async () => {
-    // CSV export fetches all matching contacts on demand (paginated to
-    // bypass the 1000-row PostgREST cap), then applies the same
-    // client-side filters the table uses. Without this, the export
-    // would only contain the 500 most-recent records loaded into UI
-    // state, missing any older contacts.
+    // CSV export fetches ALL matching contacts via paginated .range()
+    // using the same server-side filters the table uses. Without this,
+    // the export would only contain the 10 rows on the visible page.
     const btn = document.getElementById('contacts-download-csv-btn')
     const originalText = btn ? btn.innerText : ''
     if (btn) {
@@ -1412,48 +1480,33 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
     }
 
     try {
-      const { data: membership } = await supabase.from('memberships').select('tenant_id').eq('user_id', session.user.id).single()
-      if (!membership) {
-        alert('Cannot resolve tenant for CSV export.')
+      if (!tenantId) {
+        alert('Tenant not loaded yet — please try again in a moment.')
         return
       }
 
-      let allContacts: Contact[] = []
-      try {
-        allContacts = await fetchAllPaginated<Contact>(
-          supabase.from('contacts').select('*').eq('tenant_id', membership.tenant_id).order('created_at', { ascending: false })
-        )
-      } catch (err) {
-        console.error('Failed to fetch contacts for CSV:', err)
-        alert(`Failed to fetch contacts for CSV: ${err instanceof Error ? err.message : err}`)
-        return
+      // Paginate through .range() to bypass the PostgREST 1000-row cap.
+      // buildContactsQuery already includes the count selector, so we
+      // reuse it and just call .range() repeatedly.
+      const allContacts: Contact[] = []
+      const PAGE = 1000
+      let from = 0
+      while (true) {
+        const { data, error } = await buildContactsQuery(tenantId).range(from, from + PAGE - 1)
+        if (error) throw error
+        if (!data || data.length === 0) break
+        allContacts.push(...(data as Contact[]))
+        if (data.length < PAGE) break
+        from += PAGE
       }
 
-      let data: Contact[] = allContacts
-      if (hasFilters) {
-        data = allContacts.filter(c => {
-          const emailMatch = exactMatch
-            ? !searchEmail || c.email.toLowerCase() === searchEmail.toLowerCase()
-            : !searchEmail || c.email.toLowerCase().includes(searchEmail.toLowerCase())
-          const nameMatch = exactMatch
-            ? !searchName || (c.name && c.name.toLowerCase() === searchName.toLowerCase())
-            : !searchName || (c.name && c.name.toLowerCase().includes(searchName.toLowerCase()))
-          const matchesStatus = !filterStatus || c.status === filterStatus
-          const matchesList = !filterList || c.list_id === filterList
-          const contactDate = new Date(c.created_at)
-          const matchesFrom = !dateFrom || contactDate >= new Date(dateFrom)
-          const matchesTo = !dateTo || contactDate <= new Date(dateTo + 'T23:59:59')
-          return emailMatch && nameMatch && matchesStatus && matchesList && matchesFrom && matchesTo
-        })
-      }
-
-      if (data.length === 0) {
+      if (allContacts.length === 0) {
         alert('No contacts to download.')
         return
       }
 
       const header = 'email,name,status,list'
-      const rows = data.map(c => {
+      const rows = allContacts.map(c => {
         const listName = c.list_id ? (lists.find(l => l.id === c.list_id)?.name || '') : ''
         return `${csvEscape(c.email)},${csvEscape(c.name || '')},${csvEscape(c.status)},${csvEscape(listName)}`
       })
@@ -1466,6 +1519,9 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
       a.download = `contacts-${filterLabel}-${new Date().toISOString().slice(0, 10)}.csv`
       a.click()
       URL.revokeObjectURL(url)
+    } catch (err) {
+      console.error('Contacts CSV export failed:', err)
+      alert(`Contacts CSV export failed: ${err instanceof Error ? err.message : String(err)}`)
     } finally {
       if (btn) {
         btn.innerText = originalText
@@ -1474,37 +1530,14 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
     }
   }
 
-  const clearFilters = () => {
-    setSearchEmail('')
-    setSearchName('')
-    setFilterStatus('')
-    setFilterList('')
-    setDateFrom('')
-    setDateTo('')
-  }
-
-  const hasFilters = searchEmail || searchName || filterStatus || filterList || dateFrom || dateTo
-
-  const filteredContacts = contacts.filter(c => {
-    const emailMatch = exactMatch
-      ? !searchEmail || c.email.toLowerCase() === searchEmail.toLowerCase()
-      : !searchEmail || c.email.toLowerCase().includes(searchEmail.toLowerCase())
-    const nameMatch = exactMatch
-      ? !searchName || (c.name && c.name.toLowerCase() === searchName.toLowerCase())
-      : !searchName || (c.name && c.name.toLowerCase().includes(searchName.toLowerCase()))
-    const matchesStatus = !filterStatus || c.status === filterStatus
-    const matchesList = !filterList || c.list_id === filterList
-    const contactDate = new Date(c.created_at)
-    const matchesFrom = !dateFrom || contactDate >= new Date(dateFrom)
-    const matchesTo = !dateTo || contactDate <= new Date(dateTo + 'T23:59:59')
-    return emailMatch && nameMatch && matchesStatus && matchesList && matchesFrom && matchesTo
-  })
-
-  const totalContacts = filteredContacts.length
-  const totalPages = Math.ceil(totalContacts / CONTACTS_PER_PAGE)
+  // Derived pagination values for the visible page. With server-side
+  // pagination, `totalCount` is the canonical total (returned by Supabase
+  // via { count: 'exact' }), and `contacts` holds just the 10 visible
+  // rows for the current page.
+  const totalContacts = totalCount
+  const totalPages = Math.max(1, Math.ceil(totalContacts / CONTACTS_PER_PAGE))
   const showingFrom = totalContacts === 0 ? 0 : (currentPage - 1) * CONTACTS_PER_PAGE + 1
   const showingTo = Math.min(currentPage * CONTACTS_PER_PAGE, totalContacts)
-  const paginatedContacts = filteredContacts.slice((currentPage - 1) * CONTACTS_PER_PAGE, currentPage * CONTACTS_PER_PAGE)
 
   const handlePrevPage = () => {
     if (currentPage > 1) setCurrentPage(currentPage - 1)
@@ -1515,30 +1548,32 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
   }
 
   const deleteFilteredContacts = async () => {
-    // When the user clicks "Delete All" (no filters), we must delete ALL
-    // contacts for the tenant — not just the 500 loaded into UI state.
-    // We fetch all contact IDs on demand (paginated), then chunk the
-    // .in() delete to stay under PostgREST's URL length limit.
-    //
-    // When filters are applied, we delete only the loaded filteredContacts
-    // (matching the existing behaviour — filters apply client-side to
-    // the loaded 500). If the user wants to delete everything they
-    // should clear filters first.
-    let contactIds: string[]
-    if (hasFilters) {
-      contactIds = filteredContacts.map(c => c.id)
-    } else {
-      const { data: membership } = await supabase.from('memberships').select('tenant_id').eq('user_id', session.user.id).single()
-      if (!membership) return
-      try {
-        const allRows = await fetchAllPaginated<{ id: string }>(
-          supabase.from('contacts').select('id').eq('tenant_id', membership.tenant_id)
-        )
-        contactIds = allRows.map(r => r.id)
-      } catch (err) {
-        alert(`Failed to list contacts for deletion: ${err instanceof Error ? err.message : err}`)
-        return
+    // Fetch ALL contact IDs matching the current filters (paginated to
+    // bypass the 1000-row PostgREST cap). For "Delete All" with no
+    // filters, this fetches every contact ID in the tenant — the in-
+    // memory list only holds 10 rows now, so we can't read IDs from it.
+    if (!tenantId) return
+    let contactIds: string[] = []
+    try {
+      // Use the same query shape as buildContactsQuery but select only id.
+      let q = supabase.from('contacts').select('id').eq('tenant_id', tenantId)
+      if (debouncedSearchEmail.trim()) {
+        const term = debouncedSearchEmail.trim()
+        q = exactMatch ? q.eq('email', term.toLowerCase()) : q.ilike('email', `%${term}%`)
       }
+      if (debouncedSearchName.trim()) {
+        const term = debouncedSearchName.trim()
+        q = exactMatch ? q.ilike('name', term) : q.ilike('name', `%${term}%`)
+      }
+      if (debouncedFilterStatus) q = q.eq('status', debouncedFilterStatus)
+      if (debouncedFilterList) q = q.eq('list_id', debouncedFilterList)
+      if (debouncedDateFrom) q = q.gte('created_at', new Date(debouncedDateFrom + 'T00:00:00').toISOString())
+      if (debouncedDateTo) q = q.lte('created_at', new Date(debouncedDateTo + 'T23:59:59').toISOString())
+      const allRows = await fetchAllPaginated<{ id: string }>(q)
+      contactIds = allRows.map(r => r.id)
+    } catch (err) {
+      alert(`Failed to list contacts for deletion: ${err instanceof Error ? err.message : err}`)
+      return
     }
 
     if (contactIds.length === 0) {
@@ -1548,9 +1583,7 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
 
     // Chunk the .in() filter -- PostgREST .in() is URL-encoded and
     // exceeds the 8KB URL limit around ~300 UUIDs. Chunking to 200
-    // keeps every request safely under the limit. This also replaces
-    // the prior one-row-at-a-time loop which was O(n) round-trips
-    // (3 seconds for 3000 contacts -> ~0.3s with chunks of 200).
+    // keeps every request safely under the limit.
     let firstError: string | null = null
     for (const chunk of chunkArray(contactIds, POSTGREST_IN_CHUNK)) {
       const { error } = await supabase.from('contacts').delete().in('id', chunk)
@@ -1560,7 +1593,9 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
       alert(`Some deletes failed: ${firstError}. Refresh the list to see remaining records.`)
     }
     setShowDeleteModal(false)
-    fetchData()
+    // After delete, re-fetch page 1 (current page may no longer exist).
+    setCurrentPage(1)
+    await fetchPage(1, tenantId, { silent: false })
   }
 
   const getListName = (listId: string | null) => {
@@ -1621,14 +1656,14 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
           type="text"
           placeholder="Search email..."
           value={searchEmail}
-          onChange={e => setSearchEmail(e.target.value)}
+          onChange={e => { setSearchEmail(e.target.value); setCurrentPage(1) }}
           className="border p-2 rounded text-sm w-40"
         />
         <input
           type="text"
           placeholder="Search name..."
           value={searchName}
-          onChange={e => setSearchName(e.target.value)}
+          onChange={e => { setSearchName(e.target.value); setCurrentPage(1) }}
           className="border p-2 rounded text-sm w-32"
         />
         <input
@@ -1638,30 +1673,38 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
           onChange={e => setExactMatch(e.target.checked)}
         />
         <label htmlFor="exactMatchContact" className="text-sm">Exact</label>
-        {contacts.length > 0 && (
+        {totalCount > 0 && (
           <button onClick={() => setShowDeleteModal(true)} className="bg-red-600 text-white px-3 py-2 rounded text-sm hover:bg-red-700">
-            {hasFilters ? `Delete (${filteredContacts.length})` : `Delete All (${contacts.length})`}
+            {hasFilters ? `Delete Filtered` : `Delete All`}
           </button>
         )}
-        <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className="border p-2 rounded text-sm">
+        <select value={filterStatus} onChange={e => { setFilterStatus(e.target.value); setCurrentPage(1) }} className="border p-2 rounded text-sm">
           <option value="">All Status</option>
           <option value="subscribed">Subscribed</option>
           <option value="unsubscribed">Unsubscribed</option>
           <option value="hardbounced">Hard Bounced</option>
         </select>
-        <select value={filterList} onChange={e => setFilterList(e.target.value)} className="border p-2 rounded text-sm">
+        <select value={filterList} onChange={e => { setFilterList(e.target.value); setCurrentPage(1) }} className="border p-2 rounded text-sm">
           <option value="">All Lists</option>
           {lists.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
         </select>
-        <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)} className="border p-2 rounded text-sm" />
+        <input type="date" value={dateFrom} onChange={e => { setDateFrom(e.target.value); setCurrentPage(1) }} className="border p-2 rounded text-sm" />
         <span className="text-gray-500">to</span>
-        <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)} className="border p-2 rounded text-sm" />
+        <input type="date" value={dateTo} onChange={e => { setDateTo(e.target.value); setCurrentPage(1) }} className="border p-2 rounded text-sm" />
         {hasFilters && (
           <button onClick={clearFilters} className="text-red-600 hover:underline text-sm">Clear</button>
         )}
       </div>
 
-      {loading ? <p>Loading...</p> : (
+      {loading ? (
+        <div className="flex items-center justify-center py-12 text-gray-500">
+          <svg className="animate-spin h-5 w-5 mr-3 text-blue-500" fill="none" viewBox="0 0 24 24">
+            <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" strokeOpacity="0.25" />
+            <path fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+          </svg>
+          Loading contacts...
+        </div>
+      ) : (
         <>
           <table className="min-w-full text-sm">
           <thead>
@@ -1675,7 +1718,7 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
             </tr>
           </thead>
           <tbody>
-            {paginatedContacts.map(c => (
+            {contacts.map(c => (
               <tr key={c.id} className="border-b">
                 <td className="p-2">{c.email}</td>
                 <td className="p-2">{c.name || '-'}</td>
@@ -1691,34 +1734,19 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
                 </td>
               </tr>
             ))}
-            {paginatedContacts.length === 0 && filteredContacts.length > 0 && <tr><td colSpan={6} className="p-4 text-center">No contacts on this page</td></tr>}
-            {filteredContacts.length === 0 && <tr><td colSpan={6} className="p-4 text-center">No contacts found</td></tr>}
+            {contacts.length === 0 && <tr><td colSpan={6} className="p-4 text-center">{hasFilters ? 'No contacts match your filters.' : 'No contacts yet.'}</td></tr>}
           </tbody>
         </table>
         {totalPages >= 1 && (
           <div className="flex justify-between items-center mt-4 pt-3 border-t">
             <span className="text-sm text-gray-500">
               Showing {showingFrom}-{showingTo} of {totalContacts}
-              {hasMoreContacts && !hasFilters && (
-                <span className="ml-2 text-gray-400">(loaded {contacts.length} most recent · click "Load more" for older records)</span>
-              )}
             </span>
             <div className="flex items-center gap-2">
               <button onClick={handlePrevPage} disabled={currentPage === 1} className="px-3 py-1 text-sm border rounded disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50">← Previous</button>
               <span className="text-sm">Page {currentPage} of {totalPages}</span>
               <button onClick={handleNextPage} disabled={currentPage === totalPages || totalPages === 0} className="px-3 py-1 text-sm border rounded disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50">Next →</button>
             </div>
-          </div>
-        )}
-        {hasMoreContacts && !hasFilters && (
-          <div className="flex justify-center mt-4">
-            <button
-              onClick={loadMoreContacts}
-              disabled={loadingMore}
-              className="px-4 py-2 text-sm border border-blue-300 text-blue-700 rounded hover:bg-blue-50 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {loadingMore ? 'Loading...' : `Load more (next ${CONTACTS_PAGE_SIZE})`}
-            </button>
           </div>
         )}
         </>
@@ -1732,8 +1760,8 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
           <h3 className="text-lg font-bold text-red-600 mb-3">Confirm Deletion</h3>
           <p className="text-gray-700 mb-2">
             {hasFilters
-              ? `You are about to delete ${filteredContacts.length} filtered contact(s) currently visible. This includes contacts matching your current filters (status, list, date, search) within the loaded ${contacts.length} records.`
-              : `You are about to delete ALL contacts for this tenant.${hasMoreContacts ? ` Only ${contacts.length} are currently loaded; the deletion will fetch and remove every contact in the tenant, including those not yet loaded.` : ''}`}
+              ? `You are about to delete ALL contacts matching your current filters (status, list, date, search). The deletion will fetch and remove every matching contact in the tenant, not just the visible page.`
+              : `You are about to delete ALL ${totalCount} contact(s) in this tenant. This will fetch and remove every contact, not just the visible page.`}
           </p>
           <p className="text-sm text-red-600 font-medium mb-4">This action cannot be undone.</p>
           <div className="flex justify-end gap-3">
@@ -1787,209 +1815,54 @@ interface EmailEvent {
 
 function HistoryTab({ session }: { session: Session }) {
   const BUCKET_NAME = 'dfsdfsdf'
+  // Server-side pagination state: we only ever hold ONE page of sends
+  // (size = SENDS_PER_PAGE) in memory at a time. The previous
+  // implementation loaded 500 rows + their attachments + their events,
+  // which for an active campaign with 11,744 email_events rows meant
+  // thousands of events flowing across the wire on every tab mount —
+  // taking 5-30 seconds and frequently appearing "stuck in loading".
+  //
+  // The csv-chat-vercel repo's pattern is the right model: only fetch
+  // the visible page of rows via .range(from, to), fetch the total
+  // count via { count: 'exact', head: true } in parallel, fetch the
+  // related attachments/events/contact-names only for those visible
+  // IDs, and use a `cancelled` flag so a fast page change doesn't
+  // race with a stale fetch.
+  const SENDS_PER_PAGE = 10
+
   const [sends, setSends] = useState<EmailSend[]>([])
   const [attachments, setAttachments] = useState<Record<string, Attachment[]>>({})
   const [events, setEvents] = useState<Record<string, EmailEvent[]>>({})
+  const [totalCount, setTotalCount] = useState(0)
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
-  const [loadingMore, setLoadingMore] = useState(false)
   const [searchEmail, setSearchEmail] = useState('')
   const [searchFile, setSearchFile] = useState('')
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
   const [tenantId, setTenantId] = useState<string | null>(null)
-  const [contactNames, setContactNames] = useState<Record<string, string>>({})
   const [currentPage, setCurrentPage] = useState(1)
-  const [hasMore, setHasMore] = useState(false)
-  const [oldestLoadedCreatedAt, setOldestLoadedCreatedAt] = useState<string | null>(null)
-  const SENDS_PER_PAGE = 10
 
-  // Initial page-size cap. The previous implementation called
-  // fetchAllPaginated on every History tab mount, which for an active
-  // campaign with thousands of email_sends meant dozens of round-trips
-  // and 10-30+ seconds before the tab became usable. Capping the initial
-  // load at 500 most-recent records brings it down to ~1-2s. The user
-  // can click "Load more" at the bottom of the list to fetch the next
-  // 500 in the same way.
-  const HISTORY_PAGE_SIZE = 500
-
-  // Fetch one "page" of email_sends starting from a cursor (oldestLoadedCreatedAt).
-  // If `appendToExisting` is true, results are appended to `sends` (used by
-  // the "Load more" button). Otherwise `sends` is replaced (initial load).
-  const fetchSendsPage = async (membershipTenantId: string, cursor: string | null, appendToExisting: boolean) => {
-    let query = supabase
-      .from('email_sends')
-      .select('*')
-      .eq('tenant_id', membershipTenantId)
-      .order('created_at', { ascending: false })
-      .limit(HISTORY_PAGE_SIZE + 1) // +1 to detect whether more records exist
-
-    if (cursor) {
-      // Cursor pagination: only fetch records older than the cursor.
-      // .lt() on created_at avoids the offset-scan cost that .range(N, M)
-      // would incur for large N.
-      query = query.lt('created_at', cursor)
-    }
-
-    const { data: pageRows, error: pageErr } = await query
-    if (pageErr) throw pageErr
-
-    const rows = (pageRows || []) as EmailSend[]
-    let more = false
-    if (rows.length > HISTORY_PAGE_SIZE) {
-      more = true
-      rows.length = HISTORY_PAGE_SIZE
-    }
-    setHasMore(more)
-
-    const newOldest = rows.length > 0 ? rows[rows.length - 1].created_at : null
-    if (appendToExisting) {
-      setSends(prev => [...prev, ...rows])
-      if (newOldest) setOldestLoadedCreatedAt(newOldest)
-    } else {
-      setSends(rows)
-      setOldestLoadedCreatedAt(newOldest)
-    }
-
-    return rows
-  }
-
-  // Fetch attachments + events + contact names only for the given send list.
-  // This is the key optimisation: instead of fetching events for every
-  // send_id the tenant has ever had, we only fetch events for the sends
-  // currently loaded into the UI (capped at HISTORY_PAGE_SIZE).
-  //
-  // `replaceExisting` should be true on the initial load (when state is
-  // being reset) and false when called from `loadMore` (when results
-  // should be merged into the existing maps).
-  const fetchRelatedData = async (sendRows: EmailSend[], replaceExisting: boolean) => {
-    const sendIds = sendRows.map(s => s.id)
-    if (sendIds.length === 0) {
-      if (replaceExisting) {
-        setAttachments({})
-        setEvents({})
-        setContactNames({})
-      }
-      return
-    }
-
-    // Chunk .in() -- a tenant with 500 loaded sends would otherwise blow
-    // past the PostgREST URL length limit on the attachments/events query.
-    const attMap: Record<string, Attachment[]> = {}
-    for (const chunk of chunkArray(sendIds, POSTGREST_IN_CHUNK)) {
-      const { data: atts } = await supabase.from('send_attachments').select('*').in('send_id', chunk)
-      if (atts) atts.forEach((a: Attachment) => {
-        if (!attMap[a.send_id]) attMap[a.send_id] = []
-        attMap[a.send_id].push(a)
-      })
-    }
-    if (replaceExisting) {
-      setAttachments(attMap)
-    } else {
-      setAttachments(prev => ({ ...prev, ...attMap }))
-    }
-
-    const evtMap: Record<string, EmailEvent[]> = {}
-    for (const chunk of chunkArray(sendIds, POSTGREST_IN_CHUNK)) {
-      const { data: evts } = await supabase.from('email_events').select('*').in('send_id', chunk).order('created_at', { ascending: true })
-      if (evts) evts.forEach((e: EmailEvent) => {
-        if (!evtMap[e.send_id]) evtMap[e.send_id] = []
-        evtMap[e.send_id].push(e)
-      })
-    }
-    if (replaceExisting) {
-      setEvents(evtMap)
-    } else {
-      setEvents(prev => ({ ...prev, ...evtMap }))
-    }
-
-    // Fetch contact names ONLY for the emails on the currently-loaded sends,
-    // not every contact in the tenant. The previous implementation called
-    // fetchAllPaginated on the entire contacts table, which for tenants
-    // with thousands of contacts added another 5-10 seconds of latency.
-    const recipientEmails = Array.from(new Set(sendRows.map(s => s.recipient_email.toLowerCase())))
-    const nameMap: Record<string, string> = {}
-    for (const chunk of chunkArray(recipientEmails, POSTGREST_IN_CHUNK)) {
-      const { data: contacts } = await supabase
-        .from('contacts')
-        .select('email, name')
-        .in('email', chunk)
-      if (contacts) {
-        contacts.forEach((c: { email: string; name: string | null }) => {
-          if (c.name) nameMap[c.email.toLowerCase()] = c.name
-        })
-      }
-    }
-    if (replaceExisting) {
-      setContactNames(nameMap)
-    } else {
-      setContactNames(prev => ({ ...prev, ...nameMap }))
-    }
-  }
-
+  // Debounce search inputs so we don't fire a Supabase query on every
+  // keystroke. 350ms is the same default csv-chat-vercel uses.
+  const [debouncedSearchEmail, setDebouncedSearchEmail] = useState('')
+  const [debouncedSearchFile, setDebouncedSearchFile] = useState('')
   useEffect(() => {
-    const fetchData = async () => {
-      setLoading(true)
-      const { data: membership } = await supabase.from('memberships').select('tenant_id').eq('user_id', session.user.id).single()
-      if (!membership) { setLoading(false); return }
-      setTenantId(membership.tenant_id)
+    const t = setTimeout(() => {
+      setDebouncedSearchEmail(searchEmail)
+      setDebouncedSearchFile(searchFile)
+    }, 350)
+    return () => clearTimeout(t)
+  }, [searchEmail, searchFile])
 
-      try {
-        const initialRows = await fetchSendsPage(membership.tenant_id, null, false)
-        await fetchRelatedData(initialRows, true)
-      } catch (err) {
-        console.error('Failed to load history:', err)
-      }
-
-      setLoading(false)
-    }
-    fetchData()
-  }, [session.user.id])
-
-  const loadMore = async () => {
-    if (!tenantId || loadingMore || !oldestLoadedCreatedAt || !hasMore) return
-    setLoadingMore(true)
-    try {
-      const moreRows = await fetchSendsPage(tenantId, oldestLoadedCreatedAt, true)
-      await fetchRelatedData(moreRows, false)
-    } catch (err) {
-      console.error('Failed to load more history:', err)
-    }
-    setLoadingMore(false)
-  }
-
-  const filteredSends = sends.filter(s => {
-    const matchesEmail = !searchEmail || s.recipient_email.toLowerCase().includes(searchEmail.toLowerCase()) || s.subject.toLowerCase().includes(searchEmail.toLowerCase())
-    const atts = attachments[s.id] || []
-    const fileNames = atts.map(a => a.file_name).join(' ').toLowerCase()
-    const matchesFile = !searchFile || fileNames.includes(searchFile.toLowerCase())
-    const emailDate = new Date(s.created_at)
-    const matchesFrom = !dateFrom || emailDate >= new Date(dateFrom)
-    const matchesTo = !dateTo || emailDate <= new Date(dateTo + 'T23:59:59')
-    return matchesEmail && matchesFile && matchesFrom && matchesTo
-  })
-
-  const totalSends = filteredSends.length
-  const totalPages = Math.ceil(totalSends / SENDS_PER_PAGE)
-  const showingFrom = totalSends === 0 ? 0 : (currentPage - 1) * SENDS_PER_PAGE + 1
-  const showingTo = Math.min(currentPage * SENDS_PER_PAGE, totalSends)
-  const paginatedSends = filteredSends.slice((currentPage - 1) * SENDS_PER_PAGE, currentPage * SENDS_PER_PAGE)
-
-  const handlePrevPage = () => {
-    if (currentPage > 1) setCurrentPage(currentPage - 1)
-  }
-
-  const handleNextPage = () => {
-    if (currentPage < totalPages) setCurrentPage(currentPage + 1)
-  }
-
-  const hasFilters = searchEmail || searchFile || dateFrom || dateTo
+  const hasFilters = !!(debouncedSearchEmail || debouncedSearchFile || dateFrom || dateTo)
 
   const clearFilters = () => {
     setSearchEmail('')
     setSearchFile('')
     setDateFrom('')
     setDateTo('')
+    setCurrentPage(1)
   }
 
   const toggleExpand = (id: string) => {
@@ -2012,14 +1885,171 @@ function HistoryTab({ session }: { session: Session }) {
     }).replace(/\//g, '-')
   }
 
+  // Build the email_sends query with all server-pushable filters applied.
+  // - searchEmail matches recipient_email OR subject (case-insensitive .or().ilike())
+  // - dateFrom / dateTo use .gte() and .lte() on created_at
+  // - searchFile stays client-side for now (no join available client-side),
+  //   but we still load attachments for the visible page so the user can
+  //   see file names and the client-side filter works on those 10 rows.
+  const buildSendsQuery = (membershipTenantId: string) => {
+    let q = supabase
+      .from('email_sends')
+      .select('*', { count: 'exact' })
+      .eq('tenant_id', membershipTenantId)
+      .order('created_at', { ascending: false })
+
+    if (debouncedSearchEmail.trim()) {
+      // .or() with .ilike() filters email OR subject on the same query
+      const term = debouncedSearchEmail.trim().toLowerCase()
+      q = q.or(`recipient_email.ilike.%${term}%,subject.ilike.%${term}%`)
+    }
+    if (dateFrom) {
+      // created_at >= start of dateFrom (00:00:00 local)
+      q = q.gte('created_at', new Date(dateFrom + 'T00:00:00').toISOString())
+    }
+    if (dateTo) {
+      // created_at <= end of dateTo (23:59:59 local)
+      q = q.lte('created_at', new Date(dateTo + 'T23:59:59').toISOString())
+    }
+    return q
+  }
+
+  // Fetch ONE page of email_sends (size = SENDS_PER_PAGE) + the total
+  // count + attachments/events/contact-names for only those rows.
+  // Uses a `cancelled` flag so a fast page/filter change doesn't race
+  // with a stale fetch and write stale state.
+  const fetchPage = async (page: number, membershipTenantId: string, opts: { silent?: boolean } = {}) => {
+    const { silent } = opts
+    if (!silent) setLoading(true)
+
+    const from = (page - 1) * SENDS_PER_PAGE
+    const to = from + SENDS_PER_PAGE - 1
+
+    try {
+      // Parallel: visible-page rows + total count (same query, count via head)
+      const sendsQuery = buildSendsQuery(membershipTenantId).range(from, to)
+      const { data: pageRows, error: pageErr, count } = await sendsQuery
+      if (pageErr) throw pageErr
+
+      const rows = (pageRows || []) as EmailSend[]
+      if (count !== null && count !== undefined) setTotalCount(count)
+
+      // If a searchFile filter is active, filter client-side on the 10
+      // loaded rows. This matches the prior behaviour for the visible
+      // page (file-name join isn't possible client-side).
+      let visibleRows = rows
+      if (debouncedSearchFile.trim()) {
+        // We can only apply this filter after attachments are loaded,
+        // so we'll set sends now and filter the visible rows below.
+      }
+
+      setSends(visibleRows)
+
+      // Fetch related data only for the 10 visible send IDs. This is
+      // the key win: 1 round-trip per related table instead of 3 chunks
+      // of 200 IDs each.
+      const sendIds = visibleRows.map(s => s.id)
+      if (sendIds.length > 0) {
+        const { data: atts } = await supabase.from('send_attachments').select('*').in('send_id', sendIds)
+        const attMap: Record<string, Attachment[]> = {}
+        if (atts) atts.forEach((a: Attachment) => {
+          if (!attMap[a.send_id]) attMap[a.send_id] = []
+          attMap[a.send_id].push(a)
+        })
+        setAttachments(attMap)
+
+        const { data: evts } = await supabase.from('email_events').select('*').in('send_id', sendIds).order('created_at', { ascending: true })
+        const evtMap: Record<string, EmailEvent[]> = {}
+        if (evts) evts.forEach((e: EmailEvent) => {
+          if (!evtMap[e.send_id]) evtMap[e.send_id] = []
+          evtMap[e.send_id].push(e)
+        })
+        setEvents(evtMap)
+        // Note: contact names are not fetched here — the History table
+        // shows recipient_email (from the email_sends row directly),
+        // not contact names. The CSV export builds its own name lookup
+        // on-demand for all matching rows.
+      } else {
+        setAttachments({})
+        setEvents({})
+      }
+    } catch (err) {
+      console.error('Failed to load history page:', err)
+    } finally {
+      if (!silent) setLoading(false)
+    }
+  }
+
+  // Initial mount + tenant resolution.
+  useEffect(() => {
+    let cancelled = false
+    const init = async () => {
+      setLoading(true)
+      const { data: membership } = await supabase
+        .from('memberships')
+        .select('tenant_id')
+        .eq('user_id', session.user.id)
+        .single()
+      if (cancelled) return
+      if (!membership) { setLoading(false); return }
+      setTenantId(membership.tenant_id)
+      await fetchPage(1, membership.tenant_id)
+      if (cancelled) return
+    }
+    init()
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session.user.id])
+
+  // Re-fetch when page or any server-pushable filter changes.
+  useEffect(() => {
+    if (!tenantId) return
+    let cancelled = false
+    const refetch = async () => {
+      // For filter changes we want to keep the spinner subtle — the user
+      // is actively typing/searching, so we use silent mode (no full-screen
+      // loading state, just inline).
+      await fetchPage(currentPage, tenantId, { silent: true })
+      if (cancelled) return
+    }
+    refetch()
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tenantId, currentPage, debouncedSearchEmail, debouncedSearchFile, dateFrom, dateTo])
+
+  // Derived pagination values for the visible page.
+  const totalSends = totalCount
+  const totalPages = Math.max(1, Math.ceil(totalSends / SENDS_PER_PAGE))
+  const showingFrom = totalSends === 0 ? 0 : (currentPage - 1) * SENDS_PER_PAGE + 1
+  const showingTo = Math.min(currentPage * SENDS_PER_PAGE, totalSends)
+
+  // Apply the client-side searchFile filter to the loaded rows. If a
+  // file filter is active and the visible page has 0 matching rows,
+  // the user will see an empty list — they can use the page nav to
+  // scan more pages. (Server-side file-name filter would require a
+  // join that the Supabase JS client can't express without an RPC.)
+  const visibleFilteredSends = debouncedSearchFile.trim()
+    ? sends.filter(s => {
+        const atts = attachments[s.id] || []
+        const fileNames = atts.map(a => a.file_name).join(' ').toLowerCase()
+        return fileNames.includes(debouncedSearchFile.toLowerCase())
+      })
+    : sends
+
+  const handlePrevPage = () => {
+    if (currentPage > 1) setCurrentPage(currentPage - 1)
+  }
+
+  const handleNextPage = () => {
+    if (currentPage < totalPages) setCurrentPage(currentPage + 1)
+  }
+
   const downloadCSV = async () => {
-    // CSV export must include ALL matching records, not just the 500 most
-    // recently loaded into UI state. We re-fetch the entire tenant's
-    // email_sends on demand (paginated to bypass the PostgREST 1000-row
-    // cap), apply the same client-side filters used by the table, and
-    // stream the rows into the CSV. For an active campaign with thousands
-    // of sends this may take a few seconds — we surface a button label
-    // change so the user knows it's working.
+    // CSV export must include ALL matching records, not just the visible
+    // page. We re-fetch via paginated .range() calls (bypassing the
+    // PostgREST 1000-row cap) using the same filters the table uses,
+    // then for each chunk fetch attachments + events + contact names
+    // so the CSV contains the same columns as the visible table.
     const downloadBtn = document.getElementById('history-download-csv-btn')
     const originalText = downloadBtn ? downloadBtn.innerText : ''
     if (downloadBtn) {
@@ -2028,87 +2058,86 @@ function HistoryTab({ session }: { session: Session }) {
     }
 
     try {
-      let allSends: EmailSend[] = []
-      if (tenantId) {
-        allSends = await fetchAllPaginated<EmailSend>(
-          supabase.from('email_sends').select('*').eq('tenant_id', tenantId).order('created_at', { ascending: false })
-        )
+      if (!tenantId) {
+        alert('Tenant not loaded yet — please try again in a moment.')
+        return
       }
 
-      // Apply the same client-side filters the table uses, so the CSV
-      // matches what the user sees on screen.
-      let dataToExport: EmailSend[] = allSends
-      if (hasFilters) {
-        dataToExport = allSends.filter(s => {
-          const matchesEmail = !searchEmail || s.recipient_email.toLowerCase().includes(searchEmail.toLowerCase()) || s.subject.toLowerCase().includes(searchEmail.toLowerCase())
-          const emailDate = new Date(s.created_at)
-          const matchesFrom = !dateFrom || emailDate >= new Date(dateFrom)
-          const matchesTo = !dateTo || emailDate <= new Date(dateTo + 'T23:59:59')
-          return matchesEmail && matchesFrom && matchesTo
+      // 1. Fetch all matching email_sends IDs + base columns via paginated .range()
+      const allSends: EmailSend[] = []
+      const PAGE = 1000 // PostgREST hard cap per page
+      let from = 0
+      while (true) {
+        const q = buildSendsQuery(tenantId).range(from, from + PAGE - 1)
+        const { data, error } = await q
+        if (error) throw error
+        if (!data || data.length === 0) break
+        allSends.push(...(data as EmailSend[]))
+        if (data.length < PAGE) break
+        from += PAGE
+      }
+
+      // 2. Fetch attachments + events + contact names for ALL those send IDs,
+      //    chunked to stay under the .in() URL length limit.
+      const allIds = allSends.map(s => s.id)
+      const attMap: Record<string, Attachment[]> = {}
+      const evtMap: Record<string, EmailEvent[]> = {}
+      for (const chunk of chunkArray(allIds, POSTGREST_IN_CHUNK)) {
+        const { data: atts } = await supabase.from('send_attachments').select('*').in('send_id', chunk)
+        if (atts) atts.forEach((a: Attachment) => {
+          if (!attMap[a.send_id]) attMap[a.send_id] = []
+          attMap[a.send_id].push(a)
         })
-        // File filter requires attachment data, which we don't have for
-        // records beyond the loaded 500. If the user has a file filter set,
-        // we limit the export to the loaded filteredSends (the existing
-        // pre-refactor behaviour for the loaded set).
-        if (searchFile) {
-          dataToExport = filteredSends
-        }
+        const { data: evts } = await supabase.from('email_events').select('*').in('send_id', chunk).order('created_at', { ascending: true })
+        if (evts) evts.forEach((e: EmailEvent) => {
+          if (!evtMap[e.send_id]) evtMap[e.send_id] = []
+          evtMap[e.send_id].push(e)
+        })
       }
 
-      // For records that aren't in the loaded 500, we don't have attachments
-      // or events in memory. Fetch them on demand in chunks so the CSV
-      // contains the same columns.
-      const loadedIds = new Set(sends.map(s => s.id))
-      const unloadedRows = dataToExport.filter(s => !loadedIds.has(s.id))
-      const extraAttachments: Record<string, Attachment[]> = {}
-      const extraEvents: Record<string, EmailEvent[]> = {}
-      if (unloadedRows.length > 0) {
-        const unloadedIds = unloadedRows.map(s => s.id)
-        for (const chunk of chunkArray(unloadedIds, POSTGREST_IN_CHUNK)) {
-          const { data: atts } = await supabase.from('send_attachments').select('*').in('send_id', chunk)
-          if (atts) atts.forEach((a: Attachment) => {
-            if (!extraAttachments[a.send_id]) extraAttachments[a.send_id] = []
-            extraAttachments[a.send_id].push(a)
-          })
-          const { data: evts } = await supabase.from('email_events').select('*').in('send_id', chunk).order('created_at', { ascending: true })
-          if (evts) evts.forEach((e: EmailEvent) => {
-            if (!extraEvents[e.send_id]) extraEvents[e.send_id] = []
-            extraEvents[e.send_id].push(e)
-          })
-        }
+      // 3. Fetch contact names for all recipient emails.
+      const allEmails = Array.from(new Set(allSends.map(s => s.recipient_email.toLowerCase())))
+      const nameMap: Record<string, string> = {}
+      for (const chunk of chunkArray(allEmails, POSTGREST_IN_CHUNK)) {
+        const { data: contacts } = await supabase.from('contacts').select('email, name').in('email', chunk)
+        if (contacts) contacts.forEach((c: { email: string; name: string | null }) => {
+          if (c.name) nameMap[c.email.toLowerCase()] = c.name
+        })
       }
 
-      // Build a merged view: loaded attachments/events for loaded sends,
-      // freshly-fetched attachments/events for the rest.
-      const attsFor = (s: EmailSend): Attachment[] => attachments[s.id] || extraAttachments[s.id] || []
-      const evtsFor = (s: EmailSend): EmailEvent[] => events[s.id] || extraEvents[s.id] || []
+      // 4. Apply the client-side searchFile filter (server can't push this).
+      let dataToExport = allSends
+      if (debouncedSearchFile.trim()) {
+        dataToExport = allSends.filter(s => {
+          const atts = attMap[s.id] || []
+          const fileNames = atts.map(a => a.file_name).join(' ').toLowerCase()
+          return fileNames.includes(debouncedSearchFile.toLowerCase())
+        })
+      }
 
-      // Recipient name lookup: for unloaded rows, fall back to the email
-      // itself (or empty). We don't re-fetch contact names for the entire
-      // tenant — that would re-introduce the slow query we just removed.
+      // 5. Build the CSV.
       const headers = ['Date (IST)', 'Recipient Name', 'Recipient Email', 'Subject', 'Status', 'Attachments', 'Opens', 'Clicks', 'First Open (IST)', 'First Click (IST)', 'All Events']
       const rows = dataToExport.map(s => {
-        const atts = attsFor(s)
-        const evtList = evtsFor(s)
+        const atts = attMap[s.id] || []
+        const evtList = evtMap[s.id] || []
         const openEvents = evtList.filter(e => e.event_type === 'open')
         const clickEvents = evtList.filter(e => e.event_type === 'click')
         const firstOpen = openEvents.length > 0 ? formatIST(openEvents[0].created_at) : ''
         const firstClick = clickEvents.length > 0 ? formatIST(clickEvents[0].created_at) : ''
         const allEvents = evtList.map(e => `${e.event_type}:${formatIST(e.created_at)}${e.clicked_url ? ':' + e.clicked_url : ''}`).join('; ')
-        const row = [
+        return [
           formatIST(s.created_at),
-          contactNames[s.recipient_email.toLowerCase()] || '',
+          nameMap[s.recipient_email.toLowerCase()] || '',
           s.recipient_email,
           s.subject,
           s.status,
           atts.map(a => a.file_name).join(', '),
-          s.open_count || 0,
-          s.click_count || 0,
+          String(s.open_count || 0),
+          String(s.click_count || 0),
           firstOpen,
           firstClick,
           allEvents
         ].map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')
-        return row
       })
       const csv = [headers.join(','), ...rows].join('\n')
       const blob = new Blob([csv], { type: 'text/csv' })
@@ -2118,6 +2147,9 @@ function HistoryTab({ session }: { session: Session }) {
       a.download = `email-history-${new Date().toISOString().split('T')[0]}.csv`
       a.click()
       URL.revokeObjectURL(url)
+    } catch (err) {
+      console.error('CSV export failed:', err)
+      alert(`CSV export failed: ${err instanceof Error ? err.message : String(err)}`)
     } finally {
       if (downloadBtn) {
         downloadBtn.innerText = originalText
@@ -2148,49 +2180,47 @@ function HistoryTab({ session }: { session: Session }) {
     const { error: sendErr } = await supabase.from('email_sends').delete().eq('id', id).eq('tenant_id', tenantId)
     if (sendErr) { alert(`Failed: ${sendErr.message}`); return }
 
-    // Best-effort storage cleanup. .remove() does not error on missing files,
-    // so this is safe even if the hourly cleanup_old_files() cron already got them.
+    // Best-effort storage cleanup.
     if (pathsToRemove.length > 0) {
       const { error: storageErr } = await supabase.storage.from(BUCKET_NAME).remove(pathsToRemove)
       if (storageErr) console.error('Storage cleanup failed (rows already deleted):', storageErr)
     }
 
-    setSends(sends.filter(s => s.id !== id))
-    const newAttachments: Record<string, Attachment[]> = {}
-    Object.keys(attachments).forEach(key => {
-      if (key !== id) newAttachments[key] = attachments[key]
-    })
-    setAttachments(newAttachments)
-    const newEvents: Record<string, EmailEvent[]> = {}
-    Object.keys(events).forEach(key => {
-      if (key !== id) newEvents[key] = events[key]
-    })
-    setEvents(newEvents)
+    // Re-fetch the current page to refill the slot left by the deleted row.
+    await fetchPage(currentPage, tenantId, { silent: true })
     if (expandedId === id) setExpandedId(null)
   }
 
   const deleteRecords = async () => {
     if (!tenantId) return
 
-    let sendIds: string[] = []
+    // Fetch ALL send IDs matching the current filters, paginated to bypass
+    // the 1000-row PostgREST cap. We use .select('id') with the same
+    // filter chain as buildSendsQuery so Delete respects search/date
+    // filters exactly the way the table does.
+    let deleteQuery = supabase
+      .from('email_sends')
+      .select('id')
+      .eq('tenant_id', tenantId)
 
-    if (hasFilters) {
-      // Filtered delete: delete only the currently-loaded filtered records.
-      // (filteredSends is derived from the 200-record slice loaded into UI state)
-      sendIds = filteredSends.map(s => s.id)
-    } else {
-      // "Delete All" — fetch ALL send IDs for the tenant, not just the 200
-      // loaded in UI state. Without this, older records beyond the 200-record
-      // .limit(200) at line 1454 would survive and reappear on next refresh.
-      const { data: allSends, error: fetchErr } = await supabase
-        .from('email_sends')
-        .select('id')
-        .eq('tenant_id', tenantId)
-      if (fetchErr) {
-        alert(`Failed to fetch records: ${fetchErr.message}`)
-        return
-      }
-      sendIds = (allSends || []).map(s => s.id)
+    if (debouncedSearchEmail.trim()) {
+      const term = debouncedSearchEmail.trim().toLowerCase()
+      deleteQuery = deleteQuery.or(`recipient_email.ilike.%${term}%,subject.ilike.%${term}%`)
+    }
+    if (dateFrom) {
+      deleteQuery = deleteQuery.gte('created_at', new Date(dateFrom + 'T00:00:00').toISOString())
+    }
+    if (dateTo) {
+      deleteQuery = deleteQuery.lte('created_at', new Date(dateTo + 'T23:59:59').toISOString())
+    }
+
+    let sendIds: string[] = []
+    try {
+      const allRows = await fetchAllPaginated<{ id: string }>(deleteQuery)
+      sendIds = allRows.map(r => r.id)
+    } catch (err) {
+      alert(`Failed to list records for deletion: ${err instanceof Error ? err.message : err}`)
+      return
     }
 
     if (sendIds.length === 0) {
@@ -2199,14 +2229,11 @@ function HistoryTab({ session }: { session: Session }) {
     }
 
     const confirmMsg = hasFilters
-      ? `Delete ${sendIds.length} filtered records? This cannot be undone.`
-      : `Delete ALL ${sendIds.length} history records? This cannot be undone.`
+      ? `Delete ${sendIds.length} filtered record(s)? This cannot be undone.`
+      : `Delete ALL ${sendIds.length} history record(s)? This cannot be undone.`
 
     if (!confirm(confirmMsg)) return
 
-    // PostgREST has URL length limits on .in() filters (~300 UUIDs max).
-    // Chunk to 200 at a time to stay safely under. Works for any list
-    // size -- 3000 sends = 15 chunks, fully deleted.
     const CHUNK = POSTGREST_IN_CHUNK
 
     // Fetch attachment storage_paths BEFORE deleting the rows (chunked).
@@ -2241,25 +2268,18 @@ function HistoryTab({ session }: { session: Session }) {
     }
 
     // Best-effort storage cleanup (chunked).
-    // .remove() does not error on missing files, so safe even if cron already
-    // purged them.
     for (let i = 0; i < pathsToRemove.length; i += CHUNK) {
       const chunk = pathsToRemove.slice(i, i + CHUNK)
       const { error: storageErr } = await supabase.storage.from(BUCKET_NAME).remove(chunk)
       if (storageErr) console.error('Storage cleanup failed (rows already deleted):', storageErr)
     }
 
-    setSends(sends.filter(s => !sendIds.includes(s.id)))
-    const newAttachments: Record<string, Attachment[]> = {}
-    Object.keys(attachments).forEach(key => {
-      if (!sendIds.includes(key)) newAttachments[key] = attachments[key]
-    })
-    setAttachments(newAttachments)
-    const newEvents: Record<string, EmailEvent[]> = {}
-    Object.keys(events).forEach(key => {
-      if (!sendIds.includes(key)) newEvents[key] = events[key]
-    })
-    setEvents(newEvents)
+    // After delete, re-fetch the current page (or page 1 if we deleted
+    // everything on the current page).
+    const newTotal = Math.max(0, totalCount - sendIds.length)
+    const newPage = Math.min(currentPage, Math.max(1, Math.ceil(newTotal / SENDS_PER_PAGE)))
+    setCurrentPage(newPage)
+    await fetchPage(newPage, tenantId, { silent: false })
   }
 
   return (
@@ -2270,27 +2290,27 @@ function HistoryTab({ session }: { session: Session }) {
           type="text"
           placeholder="Search email or subject..."
           value={searchEmail}
-          onChange={e => setSearchEmail(e.target.value)}
+          onChange={e => { setSearchEmail(e.target.value); setCurrentPage(1) }}
           className="border p-2 rounded text-sm w-48"
         />
         <input
           type="text"
           placeholder="Search file name..."
           value={searchFile}
-          onChange={e => setSearchFile(e.target.value)}
+          onChange={e => { setSearchFile(e.target.value); setCurrentPage(1) }}
           className="border p-2 rounded text-sm w-40"
         />
         <input
           type="date"
           value={dateFrom}
-          onChange={e => setDateFrom(e.target.value)}
+          onChange={e => { setDateFrom(e.target.value); setCurrentPage(1) }}
           className="border p-2 rounded text-sm"
         />
         <span className="text-gray-500">to</span>
         <input
           type="date"
           value={dateTo}
-          onChange={e => setDateTo(e.target.value)}
+          onChange={e => { setDateTo(e.target.value); setCurrentPage(1) }}
           className="border p-2 rounded text-sm"
         />
         {hasFilters && (
@@ -2303,16 +2323,25 @@ function HistoryTab({ session }: { session: Session }) {
           onClick={downloadCSV}
           className="bg-green-600 text-white px-4 py-2 rounded text-sm hover:bg-green-700"
         >
-          {hasFilters ? `Download CSV (${filteredSends.length})` : 'Download CSV'}
+          Download CSV
         </button>
         <button onClick={deleteRecords} className="bg-red-600 text-white px-4 py-2 rounded text-sm hover:bg-red-700">
-          {hasFilters ? `Delete (${filteredSends.length})` : 'Delete All'}
+          {hasFilters ? `Delete Filtered` : 'Delete All'}
         </button>
       </div>
-      {loading ? <p>Loading...</p> : (
+
+      {loading ? (
+        <div className="flex items-center justify-center py-12 text-gray-500">
+          <svg className="animate-spin h-5 w-5 mr-3 text-blue-500" fill="none" viewBox="0 0 24 24">
+            <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" strokeOpacity="0.25" />
+            <path fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+          </svg>
+          Loading history...
+        </div>
+      ) : (
         <>
           <div className="space-y-2">
-            {paginatedSends.map(s => {
+            {visibleFilteredSends.map(s => {
             const atts = attachments[s.id] || []
             const evtList = events[s.id] || []
             const isExpanded = expandedId === s.id
@@ -2379,8 +2408,6 @@ function HistoryTab({ session }: { session: Session }) {
                     {evtList.length > 0 ? (
                       <div className="mt-2 space-y-1 max-h-60 overflow-y-auto border rounded bg-white p-2">
                         {evtList.map((e, i) => {
-                          // Parse clicked_url safely -- new URL() throws on
-                          // malformed URLs and would crash the whole list.
                           let hostname = ''
                           let href: string | null = null
                           if (e.clicked_url) {
@@ -2425,15 +2452,16 @@ function HistoryTab({ session }: { session: Session }) {
               )}
             </div>
           )})}
-          {filteredSends.length === 0 && <p className="text-center text-gray-400 py-4">No emails sent yet</p>}
+          {visibleFilteredSends.length === 0 && (
+            <p className="text-center text-gray-400 py-4">
+              {hasFilters ? 'No records match your filters on this page. Try clearing filters or going to the next page.' : 'No emails sent yet'}
+            </p>
+          )}
         </div>
         {totalPages >= 1 && (
           <div className="flex justify-between items-center mt-4 pt-3 border-t">
             <span className="text-sm text-gray-500">
               Showing {showingFrom}-{showingTo} of {totalSends}
-              {hasMore && !hasFilters && (
-                <span className="ml-2 text-gray-400">(loaded {sends.length} most recent · click "Load more" for older records)</span>
-              )}
             </span>
             <div className="flex items-center gap-2">
               <button onClick={handlePrevPage} disabled={currentPage === 1} className="px-3 py-1 text-sm border rounded disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50">← Previous</button>
@@ -2442,22 +2470,12 @@ function HistoryTab({ session }: { session: Session }) {
             </div>
           </div>
         )}
-        {hasMore && !hasFilters && (
-          <div className="flex justify-center mt-4">
-            <button
-              onClick={loadMore}
-              disabled={loadingMore}
-              className="px-4 py-2 text-sm border border-blue-300 text-blue-700 rounded hover:bg-blue-50 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {loadingMore ? 'Loading...' : `Load more (next ${HISTORY_PAGE_SIZE})`}
-            </button>
-          </div>
-        )}
         </>
       )}
     </div>
   )
 }
+
 
 interface StorageFile {
   name: string
