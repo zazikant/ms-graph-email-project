@@ -1,0 +1,14 @@
+# Normalize line endings to LF on checkout and commit.
+# The original repo had CRLF line endings (Windows-style) mixed in from
+# earlier development, which produces noisy diffs on Unix systems. Setting
+# this normalises everything to LF going forward.
+* text=auto eol=lf
+
+# Binary files (do not touch)
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.svg binary
+*.pdf binary
