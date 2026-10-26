@@ -31,6 +31,22 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
 const POSTGREST_IN_CHUNK = 200
 
 /**
+ * Extract a human-readable message from anything thrown by the Supabase
+ * client. Supabase query errors are PLAIN OBJECTS (PostgrestError), not
+ * Error instances, so `String(err)` renders "[object Object]" and hides
+ * the real cause (e.g. "canceling statement due to statement timeout").
+ * This helper always surfaces the actual `message` field when present.
+ */
+function errorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message
+  if (typeof err === 'object' && err !== null && 'message' in err) {
+    const msg = (err as { message?: unknown }).message
+    if (typeof msg === 'string' && msg) return msg
+  }
+  return String(err)
+}
+
+/**
  * Exhaust a Supabase SELECT builder through .range() pagination so the
  * 1000-row PostgREST cap does not silently truncate the result.
  *
@@ -1521,7 +1537,7 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
       URL.revokeObjectURL(url)
     } catch (err) {
       console.error('Contacts CSV export failed:', err)
-      alert(`Contacts CSV export failed: ${err instanceof Error ? err.message : String(err)}`)
+      alert(`Contacts CSV export failed: ${errorMessage(err)}`)
     } finally {
       if (btn) {
         btn.innerText = originalText
@@ -1572,7 +1588,7 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
       const allRows = await fetchAllPaginated<{ id: string }>(q)
       contactIds = allRows.map(r => r.id)
     } catch (err) {
-      alert(`Failed to list contacts for deletion: ${err instanceof Error ? err.message : err}`)
+      alert(`Failed to list contacts for deletion: ${errorMessage(err)}`)
       return
     }
 
@@ -1842,6 +1858,7 @@ function HistoryTab({ session }: { session: Session }) {
   const [dateTo, setDateTo] = useState('')
   const [tenantId, setTenantId] = useState<string | null>(null)
   const [currentPage, setCurrentPage] = useState(1)
+  const [exporting, setExporting] = useState(false)
 
   // Debounce search inputs so we don't fire a Supabase query on every
   // keystroke. 350ms is the same default csv-chat-vercel uses.
@@ -1891,10 +1908,15 @@ function HistoryTab({ session }: { session: Session }) {
   // - searchFile stays client-side for now (no join available client-side),
   //   but we still load attachments for the visible page so the user can
   //   see file names and the client-side filter works on those 10 rows.
-  const buildSendsQuery = (membershipTenantId: string) => {
+  //
+  // `columns` lets the CSV export request ONLY the fields it needs (see
+  // downloadCSV): email_sends rows carry ~58KB of html_content each, so
+  // select=* at 1000 rows/page moves ~58MB per request and trips the
+  // Postgres statement timeout (error 57014).
+  const buildSendsQuery = (membershipTenantId: string, columns = '*') => {
     let q = supabase
       .from('email_sends')
-      .select('*', { count: 'exact' })
+      .select(columns, { count: 'exact' })
       .eq('tenant_id', membershipTenantId)
       .order('created_at', { ascending: false })
 
@@ -1931,7 +1953,7 @@ function HistoryTab({ session }: { session: Session }) {
       const { data: pageRows, error: pageErr, count } = await sendsQuery
       if (pageErr) throw pageErr
 
-      const rows = (pageRows || []) as EmailSend[]
+      const rows = (pageRows || []) as unknown as EmailSend[]
       if (count !== null && count !== undefined) setTotalCount(count)
 
       // If a searchFile filter is active, filter client-side on the 10
@@ -2045,17 +2067,22 @@ function HistoryTab({ session }: { session: Session }) {
   }
 
   const downloadCSV = async () => {
-    // CSV export must include ALL matching records, not just the visible
-    // page. We re-fetch via paginated .range() calls (bypassing the
-    // PostgREST 1000-row cap) using the same filters the table uses,
-    // then for each chunk fetch attachments + events + contact names
-    // so the CSV contains the same columns as the visible table.
-    const downloadBtn = document.getElementById('history-download-csv-btn')
-    const originalText = downloadBtn ? downloadBtn.innerText : ''
-    if (downloadBtn) {
-      downloadBtn.innerText = 'Preparing CSV...'
-      downloadBtn.setAttribute('disabled', 'disabled')
-    }
+    // CSV export runs in TWO modes (mirroring the Delete button):
+    //   - Filters active  -> export EVERY record matching the current
+    //     search / file / date filters (the full filtered result set,
+    //     not just the 10 visible rows).
+    //   - No filters      -> export the ENTIRE history.
+    // All matching rows are re-fetched via paginated .range() calls
+    // (bypassing the PostgREST 1000-row cap), then attachments, events
+    // and contact names are joined in so the CSV carries the same
+    // columns as the visible table.
+    //
+    // ⚠ Slim columns are mandatory here: email_sends.html_content
+    // averages ~58KB per row, so select=* at 1000 rows/page used to
+    // move ~58MB per request and die with a Postgres statement timeout
+    // (57014), which surfaced to the user as "[object Object]". The
+    // slim column list keeps every page well under 300KB.
+    setExporting(true)
 
     try {
       if (!tenantId) {
@@ -2063,46 +2090,86 @@ function HistoryTab({ session }: { session: Session }) {
         return
       }
 
-      // 1. Fetch all matching email_sends IDs + base columns via paginated .range()
-      const allSends: EmailSend[] = []
       const PAGE = 1000 // PostgREST hard cap per page
+      const MAX_ROWS = 1_000_000 // hard stop against an infinite loop
+      const SEND_COLUMNS =
+        'id,created_at,recipient_email,subject,status,open_count,click_count'
+
+      // 1. Fetch ALL matching email_sends (slim columns) via paginated .range().
+      const allSends: EmailSend[] = []
       let from = 0
-      while (true) {
-        const q = buildSendsQuery(tenantId).range(from, from + PAGE - 1)
-        const { data, error } = await q
+      while (from < MAX_ROWS) {
+        const { data, error } = await buildSendsQuery(tenantId, SEND_COLUMNS)
+          .range(from, from + PAGE - 1)
         if (error) throw error
         if (!data || data.length === 0) break
-        allSends.push(...(data as EmailSend[]))
+        allSends.push(...(data as unknown as EmailSend[]))
         if (data.length < PAGE) break
         from += PAGE
       }
 
-      // 2. Fetch attachments + events + contact names for ALL those send IDs,
-      //    chunked to stay under the .in() URL length limit.
-      const allIds = allSends.map(s => s.id)
-      const attMap: Record<string, Attachment[]> = {}
-      const evtMap: Record<string, EmailEvent[]> = {}
-      for (const chunk of chunkArray(allIds, POSTGREST_IN_CHUNK)) {
-        const { data: atts } = await supabase.from('send_attachments').select('*').in('send_id', chunk)
-        if (atts) atts.forEach((a: Attachment) => {
-          if (!attMap[a.send_id]) attMap[a.send_id] = []
-          attMap[a.send_id].push(a)
-        })
-        const { data: evts } = await supabase.from('email_events').select('*').in('send_id', chunk).order('created_at', { ascending: true })
-        if (evts) evts.forEach((e: EmailEvent) => {
-          if (!evtMap[e.send_id]) evtMap[e.send_id] = []
-          evtMap[e.send_id].push(e)
-        })
+      if (allSends.length === 0) {
+        alert(hasFilters
+          ? 'No records match the current filters — nothing to export.'
+          : 'History is empty — nothing to export.')
+        return
       }
 
-      // 3. Fetch contact names for all recipient emails.
-      const allEmails = Array.from(new Set(allSends.map(s => s.recipient_email.toLowerCase())))
+      // 2. Fetch attachments + events for ALL those send IDs, chunked to
+      //    stay under the .in() URL length limit. Each chunk query is
+      //    ALSO paginated with an inner .range() loop, because PostgREST
+      //    caps every SELECT at 1000 rows and a 200-send chunk can hold
+      //    far more events than that (the old code silently truncated,
+      //    dropping opens/clicks from the "All Events" column).
+      const allIds = allSends.map(s => s.id)
+      const fetchRelatedForChunks = async (
+        table: 'send_attachments' | 'email_events'
+      ): Promise<Record<string, Attachment[] | EmailEvent[]>> => {
+        const map: Record<string, Attachment[] | EmailEvent[]> = {}
+        for (const chunk of chunkArray(allIds, POSTGREST_IN_CHUNK)) {
+          let chunkFrom = 0
+          while (chunkFrom < MAX_ROWS) {
+            let q = supabase.from(table).select('*').in('send_id', chunk)
+            if (table === 'email_events') {
+              q = q.order('created_at', { ascending: true })
+            }
+            const { data, error } = await q.range(chunkFrom, chunkFrom + PAGE - 1)
+            if (error) throw error
+            if (!data || data.length === 0) break
+            for (const row of data as (Attachment & EmailEvent)[]) {
+              if (!map[row.send_id]) map[row.send_id] = []
+              map[row.send_id].push(row)
+            }
+            if (data.length < PAGE) break
+            chunkFrom += PAGE
+          }
+        }
+        return map
+      }
+      const [attMap, evtMap] = await Promise.all([
+        fetchRelatedForChunks('send_attachments') as Promise<Record<string, Attachment[]>>,
+        fetchRelatedForChunks('email_events') as Promise<Record<string, EmailEvent[]>>,
+      ])
+
+      // 3. Fetch contact names for the tenant (paginated). We pull all
+      //    tenant contacts instead of .in(email, ...) matching because
+      //    addresses are stored with mixed case and .in() compares
+      //    case-sensitively — lowercased lookups used to silently miss.
       const nameMap: Record<string, string> = {}
-      for (const chunk of chunkArray(allEmails, POSTGREST_IN_CHUNK)) {
-        const { data: contacts } = await supabase.from('contacts').select('email, name').in('email', chunk)
-        if (contacts) contacts.forEach((c: { email: string; name: string | null }) => {
+      from = 0
+      while (from < MAX_ROWS) {
+        const { data, error } = await supabase
+          .from('contacts')
+          .select('email, name')
+          .eq('tenant_id', tenantId)
+          .range(from, from + PAGE - 1)
+        if (error) throw error
+        if (!data || data.length === 0) break
+        for (const c of data as { email: string; name: string | null }[]) {
           if (c.name) nameMap[c.email.toLowerCase()] = c.name
-        })
+        }
+        if (data.length < PAGE) break
+        from += PAGE
       }
 
       // 4. Apply the client-side searchFile filter (server can't push this).
@@ -2140,21 +2207,22 @@ function HistoryTab({ session }: { session: Session }) {
         ].map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')
       })
       const csv = [headers.join(','), ...rows].join('\n')
-      const blob = new Blob([csv], { type: 'text/csv' })
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
-      a.download = `email-history-${new Date().toISOString().split('T')[0]}.csv`
+      const suffix = hasFilters ? 'filtered' : 'all'
+      a.download = `email-history-${suffix}-${new Date().toISOString().split('T')[0]}.csv`
       a.click()
       URL.revokeObjectURL(url)
     } catch (err) {
       console.error('CSV export failed:', err)
-      alert(`CSV export failed: ${err instanceof Error ? err.message : String(err)}`)
+      // errorMessage() unwraps plain PostgrestError objects so the user
+      // sees the REAL cause (e.g. "canceling statement due to statement
+      // timeout") instead of "[object Object]".
+      alert(`CSV export failed: ${errorMessage(err)}`)
     } finally {
-      if (downloadBtn) {
-        downloadBtn.innerText = originalText
-        downloadBtn.removeAttribute('disabled')
-      }
+      setExporting(false)
     }
   }
 
@@ -2219,7 +2287,7 @@ function HistoryTab({ session }: { session: Session }) {
       const allRows = await fetchAllPaginated<{ id: string }>(deleteQuery)
       sendIds = allRows.map(r => r.id)
     } catch (err) {
-      alert(`Failed to list records for deletion: ${err instanceof Error ? err.message : err}`)
+      alert(`Failed to list records for deletion: ${errorMessage(err)}`)
       return
     }
 
@@ -2319,11 +2387,18 @@ function HistoryTab({ session }: { session: Session }) {
           </button>
         )}
         <button
-          id="history-download-csv-btn"
           onClick={downloadCSV}
-          className="bg-green-600 text-white px-4 py-2 rounded text-sm hover:bg-green-700"
+          disabled={exporting}
+          title={hasFilters
+            ? 'Export every record matching the current filters'
+            : 'Export the entire history (no filters active)'}
+          className="bg-green-600 text-white px-4 py-2 rounded text-sm hover:bg-green-700 disabled:opacity-60"
         >
-          Download CSV
+          {exporting
+            ? 'Preparing CSV...'
+            : hasFilters
+            ? 'Download Filtered CSV'
+            : 'Download All CSV'}
         </button>
         <button onClick={deleteRecords} className="bg-red-600 text-white px-4 py-2 rounded text-sm hover:bg-red-700">
           {hasFilters ? `Delete Filtered` : 'Delete All'}
@@ -3118,7 +3193,7 @@ function BatchesTab({ session }: { session: Session }) {
     try {
       batchesToDelete = await fetchAllPaginated<{ id: string }>(deleteQuery)
     } catch (err) {
-      alert(`Failed to list batches for deletion: ${err instanceof Error ? err.message : err}`)
+      alert(`Failed to list batches for deletion: ${errorMessage(err)}`)
       return
     }
     if (batchesToDelete.length === 0) return
