@@ -27,7 +27,7 @@ Deno.serve(async (req) => {
 
       const { data: send } = await supabase
         .from('email_sends')
-        .select('id, open_count')
+        .select('id')
         .eq('tracking_id', tracking_id)
         .single();
 
@@ -37,10 +37,17 @@ Deno.serve(async (req) => {
           tracking_id,
           event_type: 'open',
         });
-        await supabase
-          .from('email_sends')
-          .update({ open_count: (send.open_count || 0) + 1 })
-          .eq('id', send.id);
+        // Atomic increment via SQL function. The prior read-modify-write
+        // (`select open_count` then `update open_count = old + 1`) lost
+        // increments whenever two pixel requests raced -- corporate mail
+        // scanners fire bursts of concurrent opens, and a production audit
+        // (2026-10-26) found 112 of 120 sampled sends had open/click
+        // counters lower than their actual event rows. A single UPDATE
+        // re-reads the row under its row lock, so no increment is lost.
+        await supabase.rpc('increment_send_counter', {
+          p_send_id: send.id,
+          p_event_type: 'open',
+        });
       }
     } catch (e) {
       console.error('Open tracking error:', e);

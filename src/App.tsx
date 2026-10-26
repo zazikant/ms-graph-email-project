@@ -149,6 +149,31 @@ async function fetchAllPaginated<T = any>(
 }
 
 /**
+ * Fetch ALL rows from `email_events` / `send_attachments` for a set of
+ * send IDs. Two PostgREST limits apply and BOTH must be handled:
+ *   1. .in() URL-length cap      -> chunk the send IDs (POSTGREST_IN_CHUNK)
+ *   2. 1000-row per-request cap  -> paginate each chunk via fetchAllPaginated
+ * A single visible History page can hold sends with >1000 combined events
+ * (e.g. one send with 992 clicks + 1200 opens), so the page-view fetch
+ * needs the same chunk+range treatment as the CSV export.
+ */
+async function fetchAllForSends<T>(
+  table: 'email_events' | 'send_attachments',
+  sendIds: string[]
+): Promise<T[]> {
+  const out: T[] = []
+  for (let i = 0; i < sendIds.length; i += POSTGREST_IN_CHUNK) {
+    const chunk = sendIds.slice(i, i + POSTGREST_IN_CHUNK)
+    const base = supabase.from(table).select('*').in('send_id', chunk)
+    const q = table === 'email_events'
+      ? base.order('created_at', { ascending: true })
+      : base
+    out.push(...(await fetchAllPaginated<T>(q)))
+  }
+  return out
+}
+
+/**
  * List every object in a Supabase Storage folder by paginating
  * `.list(folder, { limit, offset })`. The storage API caps `limit` at
  * 100 per request and silently truncates beyond that, so we loop on offset.
@@ -625,8 +650,16 @@ function ComposeTab({ session, attachments, setAttachments }: { session: Session
         console.error('Failed to load contacts:', err)
       }
 
-      const { data: listsData } = await supabase.from('lists').select('id, name').eq('tenant_id', membership.tenant_id).order('name')
-      if (listsData) setLists(listsData)
+      // Paginated -- the bare .select() caps at 1000 rows, so a tenant with
+      // >1000 lists would silently lose the tail of the recipient picker.
+      try {
+        const listsData = await fetchAllPaginated<{ id: string; name: string }>(
+          supabase.from('lists').select('id, name').eq('tenant_id', membership.tenant_id).order('name')
+        )
+        setLists(listsData)
+      } catch (err) {
+        console.error('Failed to load lists:', err)
+      }
     }
     fetchContacts()
 
@@ -2047,21 +2080,33 @@ function HistoryTab({ session }: { session: Session }) {
       // of 200 IDs each.
       const sendIds = visibleRows.map(s => s.id)
       if (sendIds.length > 0) {
-        const { data: atts } = await supabase.from('send_attachments').select('*').in('send_id', sendIds)
-        const attMap: Record<string, Attachment[]> = {}
-        if (atts) atts.forEach((a: Attachment) => {
-          if (!attMap[a.send_id]) attMap[a.send_id] = []
-          attMap[a.send_id].push(a)
-        })
-        setAttachments(attMap)
+        // Chunked + paginated + errors surfaced. The prior single .in()
+        // query silently truncated at PostgREST's 1000-row cap when the
+        // visible page's sends had many combined events, and query errors
+        // were discarded entirely (`const { data }` with no error check),
+        // so a failed fetch looked like "no activity".
+        try {
+          const [atts, evts] = await Promise.all([
+            fetchAllForSends<Attachment>('send_attachments', sendIds),
+            fetchAllForSends<EmailEvent>('email_events', sendIds),
+          ])
+          const attMap: Record<string, Attachment[]> = {}
+          atts.forEach((a: Attachment) => {
+            if (!attMap[a.send_id]) attMap[a.send_id] = []
+            attMap[a.send_id].push(a)
+          })
+          setAttachments(attMap)
 
-        const { data: evts } = await supabase.from('email_events').select('*').in('send_id', sendIds).order('created_at', { ascending: true })
-        const evtMap: Record<string, EmailEvent[]> = {}
-        if (evts) evts.forEach((e: EmailEvent) => {
-          if (!evtMap[e.send_id]) evtMap[e.send_id] = []
-          evtMap[e.send_id].push(e)
-        })
-        setEvents(evtMap)
+          const evtMap: Record<string, EmailEvent[]> = {}
+          evts.forEach((e: EmailEvent) => {
+            if (!evtMap[e.send_id]) evtMap[e.send_id] = []
+            evtMap[e.send_id].push(e)
+          })
+          setEvents(evtMap)
+        } catch (err) {
+          console.error('Failed to load page attachments/events:', err)
+          alert(`Failed to load activity data for this page: ${errorMessage(err)}`)
+        }
         // Note: contact names are not fetched here — the History table
         // shows recipient_email (from the email_sends row directly),
         // not contact names. The CSV export builds its own name lookup
@@ -2311,20 +2356,21 @@ function HistoryTab({ session }: { session: Session }) {
     // Fetch attachment storage_paths BEFORE deleting the rows, so we can also
     // delete the actual file bytes from the storage bucket. Without this,
     // deleting a History record leaves orphan files in storage.
-    const { data: attRows } = await supabase
+    const { data: attRows, error: attListErr } = await supabase
       .from('send_attachments')
       .select('storage_path')
       .eq('send_id', id)
+    if (attListErr) { alert(`Failed: ${errorMessage(attListErr)}`); return }
     const pathsToRemove = (attRows || []).map(r => r.storage_path).filter(Boolean)
 
     const { error: evtErr } = await supabase.from('email_events').delete().eq('send_id', id)
-    if (evtErr) { alert(`Failed: ${evtErr.message}`); return }
+    if (evtErr) { alert(`Failed: ${errorMessage(evtErr)}`); return }
 
     const { error: attErr } = await supabase.from('send_attachments').delete().eq('send_id', id)
-    if (attErr) { alert(`Failed: ${attErr.message}`); return }
+    if (attErr) { alert(`Failed: ${errorMessage(attErr)}`); return }
 
     const { error: sendErr } = await supabase.from('email_sends').delete().eq('id', id).eq('tenant_id', tenantId)
-    if (sendErr) { alert(`Failed: ${sendErr.message}`); return }
+    if (sendErr) { alert(`Failed: ${errorMessage(sendErr)}`); return }
 
     // Best-effort storage cleanup.
     if (pathsToRemove.length > 0) {
@@ -2409,7 +2455,7 @@ function HistoryTab({ session }: { session: Session }) {
     }
 
     if (firstError) {
-      alert(`Failed to delete ${firstError.stage}: ${firstError.err.message}`)
+      alert(`Failed to delete ${firstError.stage}: ${errorMessage(firstError.err)}`)
       return
     }
 
@@ -2711,7 +2757,7 @@ function FilesTab({ session }: { session: Session }) {
     if (!confirm('Delete this file? This will also remove any attachment references in send history.')) return
     const { error } = await supabase.storage.from(BUCKET_NAME).remove([path])
     if (error) {
-      alert(`Delete failed: ${error.message}`)
+      alert(`Delete failed: ${errorMessage(error)}`)
       return
     }
     // Cascade: delete send_attachments rows that reference this storage path,
@@ -2774,7 +2820,7 @@ function FilesTab({ session }: { session: Session }) {
     for (const chunk of chunkArray(pathsToDelete, STORAGE_REMOVE_CHUNK)) {
       const { error } = await supabase.storage.from(BUCKET_NAME).remove(chunk)
       if (error) {
-        alert(`Delete failed: ${error.message}`)
+        alert(`Delete failed: ${errorMessage(error)}`)
         return
       }
     }
@@ -2928,11 +2974,23 @@ function ListsTab({ session, onSelectList, onListsChanged }: { session: Session,
     const { data: membership } = await supabase.from('memberships').select('tenant_id').eq('user_id', session.user.id).single()
     if (!membership) { setLoading(false); return }
 
-    const { data: listData } = await supabase
-      .from('lists')
-      .select('*')
-      .eq('tenant_id', membership.tenant_id)
-      .order('name')
+    // Paginated + errors surfaced -- the prior bare .select('*') capped at
+    // the PostgREST 1000-row limit silently and discarded query errors.
+    let listData: { id: string, name: string, created_at: string }[]
+    try {
+      listData = await fetchAllPaginated<{ id: string, name: string, created_at: string }>(
+        supabase
+          .from('lists')
+          .select('id, name, created_at')
+          .eq('tenant_id', membership.tenant_id)
+          .order('name')
+      )
+    } catch (err) {
+      console.error('Failed to load lists:', err)
+      alert(`Failed to load lists: ${errorMessage(err)}`)
+      setLoading(false)
+      return
+    }
 
     if (listData) {
       // Count contacts per list WITHOUT firing one COUNT query per list.
@@ -3063,7 +3121,7 @@ function ListsTab({ session, onSelectList, onListsChanged }: { session: Session,
     let firstError: string | null = null
     for (const chunk of chunkArray(listIds, POSTGREST_IN_CHUNK)) {
       const { error } = await supabase.from('lists').delete().in('id', chunk)
-      if (error && !firstError) firstError = error.message
+      if (error && !firstError) firstError = errorMessage(error)
     }
     if (firstError) {
       alert(`Some lists failed to delete: ${firstError}. Refresh to see remaining.`)
@@ -3230,8 +3288,14 @@ function BatchesTab({ session }: { session: Session }) {
     const from = (page - 1) * BATCHES_PER_PAGE
     const to = from + BATCHES_PER_PAGE - 1
 
-    let batchesQuery = supabase.from('batches').select('*').eq('tenant_id', membership.tenant_id)
-    let countQuery = supabase.from('batches').select('*', { count: 'exact', head: true }).eq('tenant_id', membership.tenant_id)
+    // Slim column list -- the UI uses these 11 fields only. The prior
+    // select('*') also pulled `content` (the full email HTML, tens of KB
+    // per row) on every load AND every 10-second auto-refresh -- the same
+    // heavy-column class that caused the History tab timeouts.
+    const BATCH_COLUMNS = 'id, subject, status, total_count, sent_count, failed_count, created_at, started_at, completed_at, list_id, scheduled_at'
+
+    let batchesQuery = supabase.from('batches').select(BATCH_COLUMNS).eq('tenant_id', membership.tenant_id)
+    let countQuery = supabase.from('batches').select(BATCH_COLUMNS, { count: 'exact', head: true }).eq('tenant_id', membership.tenant_id)
 
     if (search) {
       if (exactMatch) {
@@ -3243,15 +3307,23 @@ function BatchesTab({ session }: { session: Session }) {
       }
     }
 
-    const [batchesResult, countResult] = await Promise.all([
-      batchesQuery.order('created_at', { ascending: false }).range(from, to),
-      countQuery
-    ])
-
-    if (batchesResult.data) setBatches(batchesResult.data as BatchRow[])
-    if (countResult.count !== null) setTotalCount(countResult.count)
-    setCurrentPage(page)
-    setLoading(false)
+    try {
+      const [batchesResult, countResult] = await Promise.all([
+        batchesQuery.order('created_at', { ascending: false }).range(from, to),
+        countQuery
+      ])
+      // Errors surfaced -- the prior code discarded query errors entirely,
+      // so a failed load silently showed an empty/stale list.
+      if (batchesResult.error) throw batchesResult.error
+      if (batchesResult.data) setBatches(batchesResult.data as BatchRow[])
+      if (countResult.count !== null) setTotalCount(countResult.count)
+      setCurrentPage(page)
+    } catch (err) {
+      console.error('Failed to load batches:', err)
+      alert(`Failed to load batches: ${errorMessage(err)}`)
+    } finally {
+      setLoading(false)
+    }
   }
 
   useEffect(() => { fetchBatches(1) }, [session.user.id])
@@ -3311,7 +3383,7 @@ function BatchesTab({ session }: { session: Session }) {
     let firstRlError: string | null = null
     for (const chunk of chunkArray(batchIds, POSTGREST_IN_CHUNK)) {
       const { error: rlErr } = await supabase.from('recipient_list').delete().in('batch_id', chunk)
-      if (rlErr && !firstRlError) firstRlError = rlErr.message
+      if (rlErr && !firstRlError) firstRlError = errorMessage(rlErr)
     }
     if (firstRlError) {
       alert(`Failed to delete recipient lists: ${firstRlError}. No batches were deleted.`)
@@ -3322,7 +3394,7 @@ function BatchesTab({ session }: { session: Session }) {
     let firstError: string | null = null
     for (const chunk of chunkArray(batchIds, POSTGREST_IN_CHUNK)) {
       const { error } = await supabase.from('batches').delete().in('id', chunk).eq('tenant_id', tenantId)
-      if (error && !firstError) firstError = error.message
+      if (error && !firstError) firstError = errorMessage(error)
     }
     if (firstError) {
       alert(`Some batches failed to delete: ${firstError}. Refresh to see remaining.`)
@@ -3347,7 +3419,7 @@ function BatchesTab({ session }: { session: Session }) {
     const { error } = await supabase.from('batches').delete().eq('id', batchId).eq('tenant_id', tenantId)
     if (error) {
       console.error('Failed to delete batch:', error)
-      alert(`Failed to delete batch: ${error.message}`)
+      alert(`Failed to delete batch: ${errorMessage(error)}`)
       return
     }
     // Collapse expanded view if it was open
