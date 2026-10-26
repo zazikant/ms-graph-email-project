@@ -46,6 +46,75 @@ function errorMessage(err: unknown): string {
   return String(err)
 }
 
+// ---- CSV hardening helpers (shared by History + Contacts exports) ----
+// Excel quirks that previously shredded exported sheets:
+//  1. CR/LF/tab inside a cell act as row/column breaks even inside quoted
+//     fields -> control characters are stripped from every value.
+//  2. Every cell is hard-capped at 32,767 chars; a LONGER quoted field
+//     makes Excel's CSV parser lose field boundaries and merge/shred the
+//     following records (27 over-limit "All Events" fields produced the
+//     garbage rows reported on 15-10). Values are capped well below it.
+//  3. Generated timestamps must never contain commas: formatIST()'s en-IN
+//     locale emits "15-10-2026, 13:00:39", and commas inside values break
+//     paste / Text-to-Columns imports that ignore quote characters.
+const sanitizeCsvValue = (val: unknown): string =>
+  String(val ?? '')
+    // eslint-disable-next-line no-control-regex -- intentional: strip C0 control chars Excel treats as breaks
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]+/g, ' ')
+    .replace(/[ \t]{2,}/g, ' ')
+    .trim()
+
+// Comfortably below Excel's 32,767-char per-cell limit.
+const EXCEL_CELL_SAFE_MAX = 29900
+
+const capCsvValue = (val: string): string =>
+  val.length <= EXCEL_CELL_SAFE_MAX ? val : val.slice(0, EXCEL_CELL_SAFE_MAX) + '...'
+
+const csvCell = (val: unknown): string => {
+  const v = capCsvValue(sanitizeCsvValue(val))
+  return `"${v.replace(/"/g, '""')}"`
+}
+
+// Legacy alias kept for existing callers (contacts export).
+const csvEscape = (val: string): string => csvCell(val)
+
+// IST timestamp for CSV cells: "15-10-2026 13:00:39" (space separator, no
+// comma — see note 3 above). Same time zone and values as formatIST().
+const csvIST = (dateStr: string | null | undefined): string => {
+  if (!dateStr) return ''
+  const d = new Date(dateStr)
+  if (isNaN(d.getTime())) return ''
+  const p = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    hourCycle: 'h23'
+  }).formatToParts(d)
+  const get = (t: string) => p.find(x => x.type === t)?.value ?? ''
+  return `${get('day')}-${get('month')}-${get('year')} ${get('hour')}:${get('minute')}:${get('second')}`
+}
+
+// "All Events" cell: one `type:time:url` segment per event, capped below
+// the Excel cell limit at an EVENT boundary (never mid-timestamp) with an
+// explicit "(+N more)" note, so heavy-clicker records can no longer push
+// Excel's CSV parser past its 32,767-char limit and shred the sheet.
+const buildAllEventsCell = (evtList: EmailEvent[]): string => {
+  const SUFFIX_RESERVE = 60
+  const kept: string[] = []
+  let len = 0
+  for (const e of evtList) {
+    const part = capCsvValue(
+      `${e.event_type}:${csvIST(e.created_at)}${e.clicked_url ? ':' + sanitizeCsvValue(e.clicked_url) : ''}`
+    )
+    const add = (kept.length === 0 ? 0 : 2) + part.length
+    if (len + add > EXCEL_CELL_SAFE_MAX - SUFFIX_RESERVE) break
+    kept.push(part)
+    len += add
+  }
+  if (kept.length === evtList.length) return kept.join('; ')
+  return `${kept.join('; ')}; ...(+${evtList.length - kept.length} more events not shown)`
+}
+
 /**
  * Exhaust a Supabase SELECT builder through .range() pagination so the
  * 1000-row PostgREST cap does not silently truncate the result.
@@ -656,7 +725,7 @@ function ComposeTab({ session, attachments, setAttachments }: { session: Session
       refreshFiles()
       setFileToUpload(null)
     } catch (err) {
-      alert(`Upload failed: ${err instanceof Error ? err.message : 'Unknown error'}`)
+      alert(`Upload failed: ${errorMessage(err)}`)
     }
     setUploadingFile(false)
   }
@@ -759,7 +828,7 @@ function ComposeTab({ session, attachments, setAttachments }: { session: Session
       setSendLater(false)
       setScheduledAt('')
     } catch (err) {
-      setStatus(`Error: ${err instanceof Error ? err.message : 'Unknown error'}`)
+      setStatus(`Error: ${errorMessage(err)}`)
     }
 
     setLoading(false)
@@ -1017,6 +1086,7 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
   const [uploading, setUploading] = useState(false)
+  const [exporting, setExporting] = useState(false)
   const [currentPage, setCurrentPage] = useState(1)
   const [showDeleteModal, setShowDeleteModal] = useState(false)
   const [totalCount, setTotalCount] = useState(0)
@@ -1193,16 +1263,24 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
 
       if (Object.keys(updates).length > 0) {
         console.log('Updating contact with:', updates)
-        await supabase.from('contacts').update(updates).eq('id', existing.id)
+        const { error } = await supabase.from('contacts').update(updates).eq('id', existing.id)
+        if (error) {
+          alert(`Failed to update contact: ${errorMessage(error)}`)
+          return
+        }
       }
     } else {
-      await supabase.from('contacts').insert({
+      const { error } = await supabase.from('contacts').insert({
         tenant_id: membership.tenant_id,
         email: newEmail.toLowerCase(),
         name: newName.trim() || null,
         status: newStatus,
         list_id: newListId || null,
       })
+      if (error) {
+        alert(`Failed to add contact: ${errorMessage(error)}`)
+        return
+      }
     }
 
     setNewEmail('')
@@ -1215,7 +1293,11 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
 
   const handleDelete = async (id: string) => {
     if (!confirm('Delete contact?')) return
-    await supabase.from('contacts').delete().eq('id', id)
+    const { error } = await supabase.from('contacts').delete().eq('id', id)
+    if (error) {
+      alert(`Failed to delete contact: ${errorMessage(error)}`)
+      return
+    }
     // Re-fetch the current page (or page 1 if we deleted the last row on a
     // trailing page).
     if (tenantId) {
@@ -1460,15 +1542,16 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
       // Re-fetch the current page so newly-added contacts appear.
       if (tenantId) await fetchPage(currentPage, tenantId, { silent: true })
     } catch (err) {
-      alert(`Import failed: ${err instanceof Error ? err.message : 'Unknown error'}`)
+      alert(`Import failed: ${errorMessage(err)}`)
     }
     setUploading(false)
     e.target.value = ''
   }
 
   const downloadTemplate = () => {
-    const csv = 'email,name,status,list\njohn@example.com,John Doe,subscribed,My List\njane@example.com,Jane Smith,subscribed,'
-    const blob = new Blob([csv], { type: 'text/csv' })
+    // BOM + CRLF keep Excel happy with encoding and line endings.
+    const csv = '\uFEFFemail,name,status,list\r\njohn@example.com,John Doe,subscribed,My List\r\njane@example.com,Jane Smith,subscribed,'
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
@@ -1477,23 +1560,13 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
     URL.revokeObjectURL(url)
   }
 
-  const csvEscape = (val: string): string => {
-    if (val.includes(',') || val.includes('"') || val.includes('\n') || val.includes('\r')) {
-      return '"' + val.replace(/"/g, '""') + '"'
-    }
-    return val
-  }
-
   const downloadContactsCSV = async () => {
     // CSV export fetches ALL matching contacts via paginated .range()
     // using the same server-side filters the table uses. Without this,
     // the export would only contain the 10 rows on the visible page.
-    const btn = document.getElementById('contacts-download-csv-btn')
-    const originalText = btn ? btn.innerText : ''
-    if (btn) {
-      btn.innerText = 'Preparing CSV...'
-      btn.setAttribute('disabled', 'disabled')
-    }
+    // Same two modes as History: filters active -> filtered export,
+    // no filters -> entire contact list.
+    setExporting(true)
 
     try {
       if (!tenantId) {
@@ -1526,7 +1599,9 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
         const listName = c.list_id ? (lists.find(l => l.id === c.list_id)?.name || '') : ''
         return `${csvEscape(c.email)},${csvEscape(c.name || '')},${csvEscape(c.status)},${csvEscape(listName)}`
       })
-      const csv = [header, ...rows].join('\n')
+      // UTF-8 BOM so Excel detects non-ASCII names correctly; CRLF endings
+      // are the safest form for Excel's CSV/text importer.
+      const csv = '\uFEFF' + [header, ...rows].join('\r\n')
       const blob = new Blob([csv], { type: 'text/csv' })
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
@@ -1539,10 +1614,7 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
       console.error('Contacts CSV export failed:', err)
       alert(`Contacts CSV export failed: ${errorMessage(err)}`)
     } finally {
-      if (btn) {
-        btn.innerText = originalText
-        btn.removeAttribute('disabled')
-      }
+      setExporting(false)
     }
   }
 
@@ -1653,11 +1725,14 @@ function ContactsTab({ session, filterListId, refreshListsKey = 0 }: { session: 
           <input type="file" accept=".csv" onChange={handleBulkUpload} className="hidden" disabled={uploading} />
         </label>
         <button
-          id="contacts-download-csv-btn"
           onClick={downloadContactsCSV}
-          className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700"
+          disabled={exporting}
+          title={hasFilters
+            ? 'Export every contact matching the current filters'
+            : 'Export all contacts'}
+          className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 disabled:opacity-60"
         >
-          Download CSV
+          {exporting ? 'Preparing CSV...' : 'Download CSV'}
         </button>
         <button onClick={downloadTemplate} className="text-blue-600 hover:underline text-sm">
           Download Template
@@ -2182,31 +2257,34 @@ function HistoryTab({ session }: { session: Session }) {
         })
       }
 
-      // 5. Build the CSV.
+      // 5. Build the CSV. All cells go through csvCell(): control chars
+      //    stripped, 32k-capped, quote-escaped. Timestamps use csvIST()
+      //    (space separator — commas inside values shred Excel imports).
       const headers = ['Date (IST)', 'Recipient Name', 'Recipient Email', 'Subject', 'Status', 'Attachments', 'Opens', 'Clicks', 'First Open (IST)', 'First Click (IST)', 'All Events']
       const rows = dataToExport.map(s => {
         const atts = attMap[s.id] || []
         const evtList = evtMap[s.id] || []
         const openEvents = evtList.filter(e => e.event_type === 'open')
         const clickEvents = evtList.filter(e => e.event_type === 'click')
-        const firstOpen = openEvents.length > 0 ? formatIST(openEvents[0].created_at) : ''
-        const firstClick = clickEvents.length > 0 ? formatIST(clickEvents[0].created_at) : ''
-        const allEvents = evtList.map(e => `${e.event_type}:${formatIST(e.created_at)}${e.clicked_url ? ':' + e.clicked_url : ''}`).join('; ')
+        const firstOpen = openEvents.length > 0 ? csvIST(openEvents[0].created_at) : ''
+        const firstClick = clickEvents.length > 0 ? csvIST(clickEvents[0].created_at) : ''
+        const allEvents = buildAllEventsCell(evtList)
         return [
-          formatIST(s.created_at),
+          csvIST(s.created_at),
           nameMap[s.recipient_email.toLowerCase()] || '',
           s.recipient_email,
           s.subject,
           s.status,
-          atts.map(a => a.file_name).join(', '),
+          atts.map(a => a.file_name).join('; '),
           String(s.open_count || 0),
           String(s.click_count || 0),
           firstOpen,
           firstClick,
           allEvents
-        ].map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')
+        ].map(csvCell).join(',')
       })
-      const csv = [headers.join(','), ...rows].join('\n')
+      // UTF-8 BOM (Excel encoding detection) + CRLF line endings.
+      const csv = '\uFEFF' + [headers.join(','), ...rows].join('\r\n')
       const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
@@ -2624,7 +2702,7 @@ function FilesTab({ session }: { session: Session }) {
       setSelectedFile(null)
       fetchFiles()
     } catch (err) {
-      alert(`Upload failed: ${err instanceof Error ? err.message : 'Unknown error'}`)
+      alert(`Upload failed: ${errorMessage(err)}`)
     }
     setUploading(false)
   }
@@ -2905,7 +2983,11 @@ function ListsTab({ session, onSelectList, onListsChanged }: { session: Session,
     const { data: membership } = await supabase.from('memberships').select('tenant_id').eq('user_id', session.user.id).single()
     if (!membership) return
 
-    await supabase.from('lists').insert({ tenant_id: membership.tenant_id, name: newListName.trim() })
+    const { error: insertErr } = await supabase.from('lists').insert({ tenant_id: membership.tenant_id, name: newListName.trim() })
+    if (insertErr) {
+      alert(`Failed to create list: ${errorMessage(insertErr)}`)
+      return
+    }
     setNewListName('')
     setShowAddForm(false)
     fetchLists()
@@ -2913,7 +2995,11 @@ function ListsTab({ session, onSelectList, onListsChanged }: { session: Session,
 
   const handleDelete = async (id: string) => {
     if (!confirm('Delete this list? Contacts will be unlinked but not deleted.')) return
-    await supabase.from('lists').delete().eq('id', id)
+    const { error } = await supabase.from('lists').delete().eq('id', id)
+    if (error) {
+      alert(`Failed to delete list: ${errorMessage(error)}`)
+      return
+    }
     fetchLists()
   }
 
@@ -2924,7 +3010,11 @@ function ListsTab({ session, onSelectList, onListsChanged }: { session: Session,
 
   const saveEdit = async () => {
     if (!editingId || !editName.trim()) return
-    await supabase.from('lists').update({ name: editName.trim() }).eq('id', editingId)
+    const { error } = await supabase.from('lists').update({ name: editName.trim() }).eq('id', editingId)
+    if (error) {
+      alert(`Failed to rename list: ${errorMessage(error)}`)
+      return
+    }
     setEditingId(null)
     setEditName('')
     onListsChanged?.()
@@ -2968,8 +3058,15 @@ function ListsTab({ session, onSelectList, onListsChanged }: { session: Session,
 
     const listIds = dataToDelete.map(l => l.id)
     // Chunked .in() -- replaces the prior one-list-at-a-time loop.
+    // Errors are surfaced: a silent partial delete here would leave the
+    // user believing every list was removed.
+    let firstError: string | null = null
     for (const chunk of chunkArray(listIds, POSTGREST_IN_CHUNK)) {
-      await supabase.from('lists').delete().in('id', chunk)
+      const { error } = await supabase.from('lists').delete().in('id', chunk)
+      if (error && !firstError) firstError = error.message
+    }
+    if (firstError) {
+      alert(`Some lists failed to delete: ${firstError}. Refresh to see remaining.`)
     }
     fetchLists()
   }
@@ -3209,9 +3306,16 @@ function BatchesTab({ session }: { session: Session }) {
     // Chunked recipient_list delete -- .in() would blow URL length past
     // ~300 UUIDs. Replaces the previous one-batch-at-a-time loop
     // (was O(n) round-trips; now ~n/200 round-trips).
+    // Abort before touching the batches rows if this fails -- otherwise
+    // the batches would vanish while their recipients remain (orphans).
+    let firstRlError: string | null = null
     for (const chunk of chunkArray(batchIds, POSTGREST_IN_CHUNK)) {
       const { error: rlErr } = await supabase.from('recipient_list').delete().in('batch_id', chunk)
-      if (rlErr) console.error('recipient_list delete chunk failed:', rlErr)
+      if (rlErr && !firstRlError) firstRlError = rlErr.message
+    }
+    if (firstRlError) {
+      alert(`Failed to delete recipient lists: ${firstRlError}. No batches were deleted.`)
+      return
     }
 
     // Chunked batches delete -- same reason.
@@ -3235,7 +3339,11 @@ function BatchesTab({ session }: { session: Session }) {
       : `Delete batch "${subject}"? This cannot be undone.`
     if (!confirm(confirmMsg)) return
 
-    await supabase.from('recipient_list').delete().eq('batch_id', batchId)
+    const { error: rlError } = await supabase.from('recipient_list').delete().eq('batch_id', batchId)
+    if (rlError) {
+      alert(`Failed to delete batch recipients: ${errorMessage(rlError)}. The batch was NOT deleted.`)
+      return
+    }
     const { error } = await supabase.from('batches').delete().eq('id', batchId).eq('tenant_id', tenantId)
     if (error) {
       console.error('Failed to delete batch:', error)
@@ -3424,7 +3532,9 @@ function SettingsTab({ session }: { session: Session }) {
         const data = await res.json()
         setTokenStatus(data)
       }
-    } catch {}
+    } catch (err) {
+      console.error('Failed to fetch token status:', err)
+    }
   }
 
   const fetchAzureConfig = async () => {
@@ -3443,7 +3553,9 @@ function SettingsTab({ session }: { session: Session }) {
           setShowSetupGuide(true)
         }
       }
-    } catch {}
+    } catch (err) {
+      console.error('Failed to fetch Azure config:', err)
+    }
   }
 
   useEffect(() => {
@@ -3488,7 +3600,7 @@ function SettingsTab({ session }: { session: Session }) {
         window.location.href = data.authorization_url
       }
     } catch (err) {
-      setStatus(`Error: ${err instanceof Error ? err.message : 'Unknown error'}`)
+      setStatus(`Error: ${errorMessage(err)}`)
     }
     setOauthLoading(false)
   }
@@ -3549,7 +3661,7 @@ function SettingsTab({ session }: { session: Session }) {
         fetchTokenStatus()
       }
     } catch (err) {
-      setStatus(`Error: ${err instanceof Error ? err.message : 'Unknown error'}`)
+      setStatus(`Error: ${errorMessage(err)}`)
     }
     setLoading(false)
   }
@@ -3572,7 +3684,7 @@ function SettingsTab({ session }: { session: Session }) {
         setAccessToken('')
       }
     } catch (err) {
-      setStatus(`Error: ${err instanceof Error ? err.message : 'Unknown error'}`)
+      setStatus(`Error: ${errorMessage(err)}`)
     }
     setLoading(false)
   }
@@ -4411,10 +4523,19 @@ function InvitationsTab({ session }: { session: Session }) {
         throw approveError
       }
 
-      await supabase
+      const { error: markApprovedError } = await supabase
         .from('invitations')
         .update({ status: 'approved' })
         .eq('id', invitation.id)
+
+      if (markApprovedError) {
+        // Membership was created, so don't fail the whole approval --
+        // but the user MUST know the invitation row is still pending.
+        console.error('Failed to mark invitation approved:', markApprovedError)
+        await fetchInvitations()
+        setSuccess(`${invitation.email} has been approved, but marking the invitation as approved failed: ${errorMessage(markApprovedError)}`)
+        return
+      }
 
       // Auto-confirm user's email so they can login immediately
       const { error: confirmError } = await supabase.functions.invoke(CONFIRM_USER_URL, {
@@ -4462,17 +4583,27 @@ function InvitationsTab({ session }: { session: Session }) {
 
       if (userData) {
         // Delete membership
-        await supabase
+        const { error: membershipDeleteError } = await supabase
           .from('memberships')
           .delete()
           .eq('user_id', userData.id)
           .eq('tenant_id', invitation.tenant_id)
+        if (membershipDeleteError) {
+          setError(`Failed to remove membership: ${errorMessage(membershipDeleteError)}`)
+          setLoading(false)
+          return
+        }
 
         // Delete from public.users
-        await supabase
+        const { error: userDeleteError } = await supabase
           .from('users')
           .delete()
           .eq('id', userData.id)
+        if (userDeleteError) {
+          setError(`Failed to remove user record: ${errorMessage(userDeleteError)}`)
+          setLoading(false)
+          return
+        }
       }
 
       // Delete invitation
